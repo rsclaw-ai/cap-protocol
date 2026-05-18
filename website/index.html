@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CAP — CLI Agent Protocol</title>
+  <meta name="description" content="An open protocol for discovering, driving, and orchestrating any command-line AI agent. Composes with MCP, A2A, and ACP.">
+  <meta property="og:title" content="CAP — CLI Agent Protocol">
+  <meta property="og:description" content="Discover, drive, and orchestrate any command-line AI agent.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://cap-protocol.org">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <a class="brand" href="/">
+    <span class="brand-bracket">[</span><span class="brand-name">CAP</span><span class="brand-bracket">]</span>
+  </a>
+  <nav>
+    <a href="#spec">Spec</a>
+    <a href="#manifest">Manifest</a>
+    <a href="#profiles">Profiles</a>
+    <a href="https://github.com/rsclaw/cap-protocol" class="external">GitHub →</a>
+  </nav>
+</header>
+
+<main>
+
+<section class="hero">
+  <div class="status-pill">
+    <span class="status-dot"></span>
+    Draft 2026-05-18 · v1 · Public review open
+  </div>
+  <h1>
+    <span class="hero-mark">CAP</span>
+    <span class="hero-sub">CLI Agent Protocol</span>
+  </h1>
+  <p class="hero-tag">
+    Discover, drive, and orchestrate any command-line AI agent.
+  </p>
+  <p class="hero-lede">
+    One protocol that lets a single orchestrator coordinate
+    <em>Claude Code</em>, <em>Codex</em>, <em>Opencode</em>, <em>aider</em>, <em>openclaude</em>,
+    <em>Gemini CLI</em>, and any future CLI agent — whether they
+    expose a structured API or not.
+  </p>
+  <div class="hero-cta">
+    <a class="btn btn-primary" href="#spec">Read the Spec →</a>
+    <a class="btn btn-ghost" href="https://github.com/rsclaw/cap-protocol">GitHub</a>
+  </div>
+</section>
+
+<section class="pitch">
+  <h2>The 30-second pitch</h2>
+  <p>
+    Every major AI coding agent in 2026 ships as a CLI. They each have
+    their own protocol — or none at all. Trying to coordinate three of
+    them on the same project today means writing three different
+    adapters, debugging three different output formats, and giving up
+    on real-time interaction.
+  </p>
+  <p>
+    <strong>CAP fixes that.</strong> It defines a universal way to
+    drive CLI agents via PTY (works with anything that runs in a
+    terminal), uses structured fast-paths
+    (<code>stream-json</code> / <code>gRPC</code> / <code>ACP</code> /
+    <code>A2A</code>) when the agent supports them, and adds first-class
+    multi-agent orchestration on top.
+  </p>
+</section>
+
+<section class="stack" id="stack">
+  <h2>The agent protocol stack</h2>
+  <p class="muted">
+    CAP composes with — not competes with — existing protocols.
+  </p>
+<pre class="diagram"><code>┌──────────────────────────────────────────────────────────────────┐
+│                                                                  │
+│  Layer                  Protocol         Maintainer              │
+│  ─────────────────────  ──────────────   ──────────────────────  │
+│  agent ↔ tools          MCP              Anthropic               │
+│  agent ↔ editor         ACP              Zed                     │
+│  agent ↔ agent (peer)   A2A              Google / LF             │
+│  ─────────────────────  ──────────────   ──────────────────────  │
+│  orch ↔ CLI agent       <span class="hl">CAP</span>              <span class="hl">cap-protocol.org</span>     │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘</code></pre>
+  <p class="muted">
+    A single agent may speak all four at once: expose ACP to an editor,
+    A2A to remote peers, consume MCP for tools, and be driven by a CAP
+    orchestrator over PTY.
+  </p>
+</section>
+
+<section class="features">
+  <h2>How it works</h2>
+  <div class="grid-3">
+
+    <div class="card">
+      <div class="card-num">01</div>
+      <h3>PTY is the universal substrate</h3>
+      <p>
+        Any CLI agent — Claude Code, aider, cursor-agent, a future tool
+        nobody's built yet — runs in a terminal. CAP drives it like a
+        human would: typing, reading the screen, sending <kbd>Ctrl+C</kbd>,
+        watching for prompts.
+      </p>
+      <p class="card-foot">Zero protocol negotiation. Day-1 compatibility.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-num">02</div>
+      <h3>Fast-path when the agent has one</h3>
+      <p>
+        When an agent exposes <code>stream-json</code>, gRPC, ACP-stdio,
+        or A2A HTTPS+SSE, the CAP driver prefers it for cleaner event
+        extraction. PTY is the fallback, not the only path.
+      </p>
+      <p class="card-foot">No re-implementation. Just adapters.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-num">03</div>
+      <h3>Multi-agent orchestration is core</h3>
+      <p>
+        Coordinate N sub-agents on one project: plan propagation,
+        cross-agent message routing (always orchestrator-mediated and
+        human-auditable), workspace isolation via git worktrees,
+        and budget aggregation with hard cancel.
+      </p>
+      <p class="card-foot">Not bolted on. Built in.</p>
+    </div>
+
+  </div>
+</section>
+
+<section class="example" id="manifest">
+  <h2>Every agent declares a Manifest</h2>
+  <p class="muted">
+    One TOML file. Lives in the agent's package, in <code>/usr/share/cap-agents/</code>,
+    or emitted by the agent on <code>--cap-manifest</code>.
+  </p>
+
+<pre><code><span class="c">; cap-agent.toml — Claude Code example</span>
+
+<span class="k">[agent]</span>
+<span class="p">name</span>          = <span class="s">"claude-code"</span>
+<span class="p">binary</span>        = <span class="s">"claude"</span>
+<span class="p">profiles</span>      = [<span class="s">"coding"</span>]
+
+<span class="k">[startup]</span>
+<span class="p">command</span>       = [<span class="s">"claude"</span>]
+<span class="p">ready_when</span>    = { <span class="p">pattern</span> = <span class="s">"Try \"how do I\\?\""</span> }
+
+<span class="k">[fast_path]</span>
+<span class="p">stream_json</span>   = [<span class="s">"claude"</span>, <span class="s">"-p"</span>, <span class="s">"--input-format=stream-json"</span>, <span class="s">"--output-format=stream-json"</span>]
+<span class="p">acp_stdio</span>     = <span class="n">false</span>
+<span class="p">grpc</span>          = <span class="n">false</span>
+
+<span class="k">[pty]</span>
+<span class="p">cols</span>          = <span class="n">200</span>
+<span class="p">rows</span>          = <span class="n">50</span>
+<span class="p">bracketed_paste</span> = <span class="n">true</span>
+<span class="p">sigint_cancels_turn</span> = <span class="s">"graceful"</span>
+<span class="p">queued_input_supported</span> = <span class="n">true</span>
+
+<span class="k">[parse]</span>
+<span class="p">idle</span>          = [<span class="s">"^&gt; $"</span>, <span class="s">"^❯ $"</span>]
+<span class="p">tool_call_start</span> = <span class="s">"^◉ (?P&lt;tool&gt;\\w+)\\((?P&lt;args&gt;.*?)\\)$"</span>
+
+<span class="k">[capabilities.coding]</span>
+<span class="p">fs</span>            = { <span class="p">read</span> = <span class="n">true</span>, <span class="p">write</span> = <span class="n">true</span>, <span class="p">scope</span> = <span class="s">"workspace_only"</span> }
+<span class="p">terminal</span>      = { <span class="p">enabled</span> = <span class="n">true</span>, <span class="p">concurrent_max</span> = <span class="n">4</span> }
+<span class="p">tool_permission</span> = <span class="s">"interactive"</span>
+<span class="p">artifacts</span>     = [<span class="s">"diff"</span>, <span class="s">"pr_link"</span>, <span class="s">"test_result"</span>, <span class="s">"plan_doc"</span>]</code></pre>
+
+  <p class="muted">
+    Want to add a new agent to the ecosystem? Write a manifest and a
+    PTY parser. PR welcome.
+  </p>
+</section>
+
+<section class="spec" id="spec">
+  <h2>The specification</h2>
+  <p>
+    The v1 draft is on GitHub. Two normative documents:
+  </p>
+  <ul class="spec-list">
+    <li>
+      <a href="https://github.com/rsclaw/cap-protocol/blob/main/docs/cap-v1.md">
+        <strong>CAP Core v1</strong>
+      </a>
+      <span class="muted">— transport bindings (PTY / stream-json / gRPC / ACP / A2A), core events, manifest, orchestration, A2A interop.</span>
+    </li>
+    <li>
+      <a href="https://github.com/rsclaw/cap-protocol/blob/main/docs/cap-profile-coding-v1.md">
+        <strong>CAP Profile: Coding v1</strong>
+      </a>
+      <span class="muted">— filesystem & terminal reverse RPC, code-specific artifact types, ACP bridge mapping.</span>
+    </li>
+  </ul>
+</section>
+
+<section class="profiles" id="profiles">
+  <h2>Profiles</h2>
+  <p class="muted">
+    The core is domain-neutral. Vertical extensions layer on top.
+  </p>
+  <table class="profile-table">
+    <thead><tr><th>Profile</th><th>Status</th><th>Scope</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>profile/coding</code></td>
+        <td><span class="badge badge-draft">draft v1</span></td>
+        <td>Software engineering: fs/terminal RPC, diffs, PRs, tests, commits</td>
+      </tr>
+      <tr>
+        <td><code>profile/devops</code></td>
+        <td><span class="badge badge-reserved">reserved</span></td>
+        <td>Infrastructure agents: k8s, terraform, ansible context</td>
+      </tr>
+      <tr>
+        <td><code>profile/data</code></td>
+        <td><span class="badge badge-reserved">reserved</span></td>
+        <td>Data analysis: dataframe artifacts, SQL sessions</td>
+      </tr>
+      <tr>
+        <td><code>profile/security</code></td>
+        <td><span class="badge badge-reserved">reserved</span></td>
+        <td>Audit / pentest agents: finding artifacts, audit logs</td>
+      </tr>
+      <tr>
+        <td><code>profile/research</code></td>
+        <td><span class="badge badge-reserved">reserved</span></td>
+        <td>Literature / scientific agents</td>
+      </tr>
+      <tr>
+        <td><code>profile/sysadmin</code></td>
+        <td><span class="badge badge-reserved">reserved</span></td>
+        <td>System operations agents</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section class="status">
+  <h2>Status</h2>
+  <ul class="timeline">
+    <li>
+      <span class="dot done"></span>
+      <strong>2026-05-18</strong> · v1 draft published. Public review open.
+    </li>
+    <li>
+      <span class="dot active"></span>
+      <strong>now</strong> · Reference Rust implementation in progress
+      <span class="muted">(rsclaw)</span>.
+    </li>
+    <li>
+      <span class="dot todo"></span>
+      <strong>next</strong> · First-party manifests for Claude Code,
+      Opencode, aider, openclaude, codex.
+    </li>
+    <li>
+      <span class="dot todo"></span>
+      <strong>future</strong> · Linux Foundation governance proposal
+      once 3+ independent implementations exist.
+    </li>
+  </ul>
+</section>
+
+<section class="faq">
+  <h2>FAQ</h2>
+
+  <details>
+    <summary>How is this different from ACP?</summary>
+    <p>
+      ACP (Zed) is for <em>editor ↔ agent</em> over local stdio.
+      CAP is for <em>orchestrator ↔ CLI agent</em> across local,
+      remote, and fleet. CAP can bridge to ACP agents via its ACP-stdio
+      binding — they don't compete. Different layers.
+    </p>
+  </details>
+
+  <details>
+    <summary>How is this different from A2A?</summary>
+    <p>
+      A2A is generic agent-to-agent peer coordination. CAP is the
+      vertical for CLI agents specifically, with PTY as a universal
+      substrate that A2A doesn't address. CAP composes with A2A:
+      a CAP-driven agent can be exposed as an A2A peer, and an A2A
+      peer can be driven by a CAP orchestrator.
+    </p>
+  </details>
+
+  <details>
+    <summary>Does my agent need to support all five bindings?</summary>
+    <p>
+      No. The only required binding is PTY, which works automatically
+      because your agent already runs in a terminal. Fast-paths
+      (stream-json / gRPC / ACP / A2A) are optional optimizations.
+      Most agents implement at most one fast-path.
+    </p>
+  </details>
+
+  <details>
+    <summary>Can I use CAP for non-coding agents?</summary>
+    <p>
+      Yes. The core protocol is domain-neutral. <code>profile/coding</code>
+      is just the first vertical. <code>profile/devops</code>,
+      <code>profile/data</code>, and others are reserved for the same
+      pattern — the core spec applies unchanged.
+    </p>
+  </details>
+
+  <details>
+    <summary>How does multi-agent coordination work?</summary>
+    <p>
+      Each sub-agent gets a CAP URN (<code>cap://agent-1</code>).
+      The orchestrator publishes a master plan whose entries reference
+      sub-agents via <code>_meta.cap.assigned_to</code>. Sub-agents never
+      talk directly — all inter-agent messages route through the
+      orchestrator and appear in the human-auditable log. See spec §10.
+    </p>
+  </details>
+
+  <details>
+    <summary>What about real-time bidirectional conversation?</summary>
+    <p>
+      PTY enables it as far as the underlying LLM allows. Current LLMs
+      do not support atomic mid-turn interruption (you can't change
+      Claude's mind mid-sentence). CAP provides a <em>cooperative
+      interruption pattern</em>: cancel current turn, preserve partial
+      output, resend with user correction. See spec §10.6.
+    </p>
+  </details>
+
+</section>
+
+</main>
+
+<footer>
+  <div class="footer-inner">
+    <div>
+      <span class="brand-bracket">[</span><strong>CAP</strong><span class="brand-bracket">]</span>
+      · CLI Agent Protocol
+    </div>
+    <div class="muted small">
+      Spec: <a href="https://github.com/rsclaw/cap-protocol/blob/main/docs/cap-v1.md">core v1</a> ·
+      <a href="https://github.com/rsclaw/cap-protocol/blob/main/docs/cap-profile-coding-v1.md">coding profile v1</a>
+      <br>
+      Repo: <a href="https://github.com/rsclaw/cap-protocol">github.com/rsclaw/cap-protocol</a>
+      <br>
+      Stewardship: <em>rsclaw maintainers, transitional</em>.
+      LF/foundation proposal once 3+ independent implementations exist.
+    </div>
+    <div class="muted small">
+      Spec text licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.
+      Reference code under MIT.
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
