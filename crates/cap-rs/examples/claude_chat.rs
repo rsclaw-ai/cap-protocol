@@ -26,8 +26,7 @@ use tokio::sync::mpsc;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with_target(false)
         .with_writer(std::io::stderr)
@@ -40,7 +39,13 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("│   type 'exit' or '/quit' or Ctrl+D to end");
     eprintln!();
 
-    let mut driver = ClaudeCodeDriver::builder(&cwd).spawn().await?;
+    // Interactive demo — opt in to claude's permission bypass so tool
+    // calls in the middle of the chat don't hang the REPL. Real CAP
+    // orchestrators should leave this off and forward permission events.
+    let mut driver = ClaudeCodeDriver::builder(&cwd)
+        .dangerously_skip_permissions(true)
+        .spawn()
+        .await?;
 
     // Read stdin lines from a background thread so we can select between
     // events from claude and user input. Tokio's stdin is awkward for
@@ -171,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
                     Some(prompt) => {
                         pending_turns += 1;
                         driver.send(ClientFrame::Prompt {
-                            content: vec![Content::Text(prompt)],
+                            content: vec![Content::text(prompt)],
                         }).await?;
                     }
                     None => {

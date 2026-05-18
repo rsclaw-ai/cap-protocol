@@ -24,8 +24,7 @@ use cap_rs::driver::pty::{AgentParser, PtyDriver, ReplParser};
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with_target(false)
         .with_writer(std::io::stderr)
@@ -78,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
                         if let Some((line, expected)) = probe_iter.next() {
                             eprintln!("→ send: {line}");
                             driver.send(ClientFrame::Prompt {
-                                content: vec![Content::Text(line.into())],
+                                content: vec![Content::text(line)],
                             }).await?;
                             eprint!("  (expect ~ \"{expected}\"): ");
                         }
@@ -89,8 +88,8 @@ async fn main() -> anyhow::Result<()> {
                             eprintln!("│ {t}");
                         }
                     }
-                    Some(AgentEvent::AskUser { prompt, kind, .. }) => {
-                        eprintln!("? ask ({kind:?}): {prompt}");
+                    Some(AgentEvent::AskUser { prompt, ask_kind, .. }) => {
+                        eprintln!("? ask ({ask_kind:?}): {prompt}");
                         // For demo, auto-yes.
                         driver.send_bytes(b"y\r").await?;
                     }
@@ -99,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
                         if let Some((line, expected)) = probe_iter.next() {
                             eprintln!("→ send: {line}");
                             driver.send(ClientFrame::Prompt {
-                                content: vec![Content::Text(line.into())],
+                                content: vec![Content::text(line)],
                             }).await?;
                             eprint!("  (expect ~ \"{expected}\"): ");
                         } else {

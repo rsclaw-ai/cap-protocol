@@ -14,7 +14,6 @@
 //! (Claude Code TUI, aider, codex CLI, …) layer on top.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -22,7 +21,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, trace, warn};
 
 use crate::core::{AgentEvent, ClientFrame, Content, StopReason, TextChannel, Usage};
-use crate::driver::{Driver, DriverError};
+use crate::driver::{Driver, DriverError, DriverExitStatus};
 
 // ---------------------------------------------------------------------------
 // AgentParser
@@ -193,36 +192,24 @@ impl ReplParser {
     pub fn aider() -> Self {
         Self::new(
             "aider",
-            &[r"^>\s*$"],            // top-level ">"
+            &[r"^>\s*$"],              // top-level ">"
             Some(r"\?\s*\[Y/n\]\s*$"), // "(Y/n)" confirmation
         )
     }
 
     /// Build a parser for `python3 -i` / `python` interactive REPL.
     pub fn python_repl() -> Self {
-        Self::new(
-            "python-repl",
-            &[r"^>>>\s*$", r"^\.\.\.\s*$"],
-            None,
-        )
+        Self::new("python-repl", &[r"^>>>\s*$", r"^\.\.\.\s*$"], None)
     }
 
     /// Build a parser for any generic REPL using `> ` or `❯ ` prompts.
     pub fn generic_repl() -> Self {
-        Self::new(
-            "generic-repl",
-            &[r"^>\s*$", r"^❯\s*$"],
-            None,
-        )
+        Self::new("generic-repl", &[r"^>\s*$", r"^❯\s*$"], None)
     }
 
     /// Custom constructor — give your own prompt regexes (anchored on
     /// the start of a logical line) and an optional yes/no detector.
-    pub fn new(
-        name: &'static str,
-        prompts: &[&str],
-        ask_yes_no: Option<&str>,
-    ) -> Self {
+    pub fn new(name: &'static str, prompts: &[&str], ask_yes_no: Option<&str>) -> Self {
         let prompts = prompts
             .iter()
             .map(|p| regex_lite::Regex::new(p).expect("invalid prompt regex"))
@@ -243,6 +230,51 @@ impl ReplParser {
     fn current_screen(&mut self) -> String {
         self.vt.screen().contents()
     }
+
+    /// Scan the bottom of a freshly-repainted screen for prompt / yes-no
+    /// boundary markers. Walks the last few non-empty lines and returns
+    /// any synthesized events. Used when an append-only delta isn't
+    /// available because the screen scrolled.
+    fn scan_for_boundary(&mut self, screen: &str) -> Vec<AgentEvent> {
+        let mut events = Vec::new();
+        let tail: Vec<&str> = screen
+            .lines()
+            .rev()
+            .filter(|l| !l.trim().is_empty())
+            .take(4)
+            .collect();
+        for line in tail {
+            let trimmed = line.trim_end_matches(['\n', '\r']);
+            if self.prompts.iter().any(|re| re.is_match(trimmed)) {
+                if self.seen_first_prompt {
+                    events.push(AgentEvent::Done {
+                        stop_reason: StopReason::EndTurn,
+                        usage: Usage::default(),
+                    });
+                    self.turn += 1;
+                } else {
+                    self.seen_first_prompt = true;
+                    events.push(AgentEvent::Ready {
+                        session_id: format!("{}-pid{}", self.name, std::process::id()),
+                        model: None,
+                    });
+                }
+                return events;
+            }
+            if let Some(re) = &self.ask_yes_no {
+                if re.is_match(trimmed) {
+                    events.push(AgentEvent::AskUser {
+                        ask_id: format!("ask_{}", self.turn),
+                        prompt: trimmed.to_string(),
+                        ask_kind: crate::core::AskKind::YesNo,
+                        options: Vec::new(),
+                    });
+                    return events;
+                }
+            }
+        }
+        events
+    }
 }
 
 impl AgentParser for ReplParser {
@@ -253,12 +285,17 @@ impl AgentParser for ReplParser {
     fn on_bytes(&mut self, bytes: &[u8]) -> Vec<AgentEvent> {
         self.vt.process(bytes);
         let screen = self.current_screen();
-        // We work on the rendered screen, taking append-only deltas.
         if !screen.starts_with(&self.buffer) {
-            // Screen scrolled / repainted. Reset buffer to current screen.
+            // Screen scrolled / repainted. We can't reconstruct a clean
+            // delta against the old buffer, but we still need to detect
+            // boundary signals — otherwise a TUI agent that repaints on
+            // every turn would never emit Done. Scan the bottom of the
+            // freshly painted screen for a prompt or yes/no line and
+            // synthesize the appropriate event before resetting state.
+            let events = self.scan_for_boundary(&screen);
             self.buffer = screen.clone();
             self.emit_cursor = screen.len();
-            return Vec::new();
+            return events;
         }
         let delta = screen[self.buffer.len()..].to_string();
         if delta.is_empty() {
@@ -277,7 +314,7 @@ impl AgentParser for ReplParser {
         let mut consumed = 0usize;
         for line in region.split_inclusive('\n') {
             // Trim trailing newline for matching but include in the emit.
-            let trimmed = line.trim_end_matches(|c: char| c == '\n' || c == '\r');
+            let trimmed = line.trim_end_matches(['\n', '\r']);
             let is_prompt = self.prompts.iter().any(|re| re.is_match(trimmed));
             let is_yesno = self
                 .ask_yes_no
@@ -308,7 +345,7 @@ impl AgentParser for ReplParser {
                 events.push(AgentEvent::AskUser {
                     ask_id: format!("ask_{}", self.turn),
                     prompt: trimmed.to_string(),
-                    kind: crate::core::AskKind::YesNo,
+                    ask_kind: crate::core::AskKind::YesNo,
                     options: Vec::new(),
                 });
                 consumed += line.len();
@@ -367,15 +404,19 @@ pub struct PtyDriver {
     /// used for resize.
     master: Box<dyn MasterPty + Send>,
 
-    /// Whether the child has exited (set by reader thread on EOF).
+    /// Whether the child has exited (set by child-waiter thread).
     exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
+    /// Final exit status, set once the child has reaped.
+    exit_status: std::sync::Arc<std::sync::Mutex<Option<DriverExitStatus>>>,
 }
 
 impl std::fmt::Debug for PtyDriver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PtyDriver")
             .field("input_open", &self.input_tx.is_some())
-            .field("exited", &self.exited.load(std::sync::atomic::Ordering::Relaxed))
+            .field("alive", &self.is_alive())
+            .field("exit_status", &self.exit_status())
             .finish()
     }
 }
@@ -434,8 +475,8 @@ impl Driver for PtyDriver {
         match frame {
             ClientFrame::Prompt { content } => {
                 for c in content {
-                    if let Content::Text(t) = c {
-                        self.send_bytes(t.as_bytes()).await?;
+                    if let Content::Text { text } = c {
+                        self.send_bytes(text.as_bytes()).await?;
                     }
                     // Image / other content not meaningful for raw PTY.
                 }
@@ -443,9 +484,21 @@ impl Driver for PtyDriver {
                 self.send_bytes(b"\r").await?;
                 Ok(())
             }
-            ClientFrame::Cancel => {
+            ClientFrame::Cancel { .. } => {
                 // Ctrl+C — gracefully cancel current turn for most TUI agents.
+                // Scope `Session` would warrant SIGTERM via the master PTY,
+                // but spec leaves the choice to the binding; we send ETX for
+                // both today.
                 self.send_bytes(b"\x03").await
+            }
+            ClientFrame::SessionConfig(_) => {
+                // PTY agents take config via spawn-time argv/env. An inline
+                // `cap.session.config` after the session is up has no
+                // wire equivalent on raw stdin.
+                Err(DriverError::AgentError {
+                    code: "cap_session_config_inline_unsupported".into(),
+                    message: "PTY binding consumes SessionConfig at spawn".into(),
+                })
             }
             ClientFrame::AskUserAnswer { value, .. } => {
                 // Best-effort: type the answer + Enter.
@@ -474,9 +527,25 @@ impl Driver for PtyDriver {
     async fn shutdown(&mut self) -> Result<(), DriverError> {
         // Drop input first so writer thread exits.
         self.input_tx = None;
+        // If the waiter thread hasn't published an exit yet, record that
+        // the orchestrator initiated shutdown.
+        let mut slot = self.exit_status.lock().expect("exit_status mutex poisoned");
+        if slot.is_none() {
+            *slot = Some(DriverExitStatus::Killed);
+            self.exited
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         // Closing the master forces slave HUP; the reader thread will see
         // EOF and exit. We rely on Drop to deallocate.
         Ok(())
+    }
+
+    fn is_alive(&self) -> bool {
+        !self.exited.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn exit_status(&self) -> Option<DriverExitStatus> {
+        self.exit_status.lock().ok().and_then(|g| g.clone())
     }
 }
 
@@ -591,10 +660,21 @@ impl PtyDriverBuilder {
         let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(64);
         let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
         let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let exit_status = std::sync::Arc::new(std::sync::Mutex::new(None));
 
-        spawn_reader_thread(reader, parser, event_tx.clone(), std::sync::Arc::clone(&exited));
+        spawn_reader_thread(
+            reader,
+            parser,
+            event_tx.clone(),
+            std::sync::Arc::clone(&exited),
+        );
         spawn_writer_thread(writer, input_rx);
-        spawn_child_waiter(child, event_tx, std::sync::Arc::clone(&exited));
+        spawn_child_waiter(
+            child,
+            event_tx,
+            std::sync::Arc::clone(&exited),
+            std::sync::Arc::clone(&exit_status),
+        );
 
         // Drop slave — only master is kept.
         drop(pair.slave);
@@ -604,6 +684,7 @@ impl PtyDriverBuilder {
             event_rx,
             master: pair.master,
             exited,
+            exit_status,
         })
     }
 }
@@ -678,17 +759,23 @@ fn spawn_child_waiter(
     mut child: Box<dyn portable_pty::Child + Send + Sync>,
     event_tx: mpsc::Sender<AgentEvent>,
     exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    exit_status: std::sync::Arc<std::sync::Mutex<Option<DriverExitStatus>>>,
 ) {
     std::thread::Builder::new()
         .name("cap-rs-pty-waiter".into())
         .spawn(move || {
-            // Block until child exits.
-            let _ = child.wait();
-            // Give reader thread a moment to flush any remaining output.
-            std::thread::sleep(Duration::from_millis(50));
+            let status = child.wait();
+            let mut slot = exit_status.lock().expect("exit_status mutex poisoned");
+            if slot.is_none() {
+                *slot = Some(match status {
+                    Ok(s) => DriverExitStatus::Exited {
+                        code: i32::try_from(s.exit_code()).ok(),
+                    },
+                    Err(_) => DriverExitStatus::Disconnected,
+                });
+            }
+            drop(slot);
             exited.store(true, std::sync::atomic::Ordering::Relaxed);
-            // Reader thread will emit its own Done via on_eof when the
-            // PTY closes; we don't double-fire here.
             drop(event_tx);
         })
         .expect("failed to spawn PTY child waiter thread");

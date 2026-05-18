@@ -17,8 +17,7 @@ use cap_rs::driver::stream_json::ClaudeCodeDriver;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with_target(false)
         .with_writer(std::io::stderr)
@@ -35,11 +34,17 @@ async fn main() -> anyhow::Result<()> {
     println!();
 
     let started = Instant::now();
-    let mut driver = ClaudeCodeDriver::spawn(&cwd).await?;
+    // Smoke test runs unattended — opt in to claude's permission bypass.
+    // Production callers SHOULD leave this off (the default) and route
+    // permission prompts through CAP.
+    let mut driver = ClaudeCodeDriver::builder(&cwd)
+        .dangerously_skip_permissions(true)
+        .spawn()
+        .await?;
 
     driver
         .send(ClientFrame::Prompt {
-            content: vec![Content::Text(prompt.clone())],
+            content: vec![Content::text(prompt.clone())],
         })
         .await?;
 
@@ -84,10 +89,7 @@ async fn main() -> anyhow::Result<()> {
                     println!();
                     last_was_text = false;
                 }
-                println!(
-                    "⚙  tool   {name}({})",
-                    short(&input.to_string(), 80)
-                );
+                println!("⚙  tool   {name}({})", short(&input.to_string(), 80));
             }
             AgentEvent::ToolCallEnd {
                 output, is_error, ..

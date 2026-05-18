@@ -19,12 +19,13 @@
 //! ```no_run
 //! # #[cfg(feature = "stream-json")]
 //! # async fn run() -> anyhow::Result<()> {
+//! use cap_rs::driver::Driver;
 //! use cap_rs::driver::stream_json::ClaudeCodeDriver;
 //! use cap_rs::core::{ClientFrame, Content};
 //!
 //! let mut driver = ClaudeCodeDriver::spawn(std::env::current_dir()?).await?;
 //! driver.send(ClientFrame::Prompt {
-//!     content: vec![Content::Text("What is 2 + 2?".into())],
+//!     content: vec![Content::text("What is 2 + 2?")],
 //! }).await?;
 //!
 //! while let Some(event) = driver.next_event().await {
@@ -34,7 +35,7 @@
 //! # }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/cap-rs/0.0.0")]
+#![doc(html_root_url = "https://docs.rs/cap-rs/0.0.1")]
 #![warn(missing_debug_implementations)]
 
 pub mod core;

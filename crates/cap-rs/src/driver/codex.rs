@@ -30,8 +30,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, trace, warn};
 
-use crate::core::{AgentEvent, ClientFrame, Content, StopReason, TextChannel, Usage};
-use crate::driver::{Driver, DriverError};
+use crate::core::{AgentEvent, ClientFrame, StopReason, TextChannel, Usage};
+use crate::driver::{Driver, DriverError, DriverExitStatus};
 
 /// Driver for OpenAI's `codex` CLI, using its `exec --json` mode.
 pub struct CodexExecDriver {
@@ -43,6 +43,9 @@ pub struct CodexExecDriver {
 
     /// Child handle for shutdown.
     child: Option<Child>,
+
+    exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    exit_status: std::sync::Arc<std::sync::Mutex<Option<DriverExitStatus>>>,
 }
 
 impl std::fmt::Debug for CodexExecDriver {
@@ -82,12 +85,16 @@ impl CodexExecDriver {
 
 #[async_trait]
 impl Driver for CodexExecDriver {
-    async fn send(&mut self, _frame: ClientFrame) -> Result<(), DriverError> {
+    async fn send(&mut self, frame: ClientFrame) -> Result<(), DriverError> {
         // codex exec is one-shot — the only input is the prompt passed at
         // spawn-time. Multi-turn means a fresh spawn with .resume(thread_id).
+        let code = match &frame {
+            ClientFrame::Cancel { .. } => "cap_cancel_unsupported",
+            _ => "cap_queued_input_unsupported",
+        };
         Err(DriverError::AgentError {
-            code: "codex_exec_oneshot".into(),
-            message: "codex exec is one-shot per process; use builder().resume(id) for multi-turn"
+            code: code.into(),
+            message: "codex exec is one-shot per process; use builder().resume(thread_id) for the next turn"
                 .into(),
         })
     }
@@ -99,9 +106,29 @@ impl Driver for CodexExecDriver {
     async fn shutdown(&mut self) -> Result<(), DriverError> {
         if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
-            let _ = child.wait().await;
+            let waited = child.wait().await;
+            let mut slot = self.exit_status.lock().expect("exit_status mutex poisoned");
+            if slot.is_none() {
+                *slot = Some(match waited {
+                    Ok(s) => match s.code() {
+                        Some(code) => DriverExitStatus::Exited { code: Some(code) },
+                        None => DriverExitStatus::Killed,
+                    },
+                    Err(_) => DriverExitStatus::Disconnected,
+                });
+            }
         }
+        self.exited
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
+    }
+
+    fn is_alive(&self) -> bool {
+        !self.exited.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn exit_status(&self) -> Option<DriverExitStatus> {
+        self.exit_status.lock().ok().and_then(|g| g.clone())
     }
 }
 
@@ -230,14 +257,23 @@ impl CodexExecBuilder {
 
         let (reader_tx, reader_rx) = mpsc::channel::<AgentEvent>(64);
         let thread_id = std::sync::Arc::new(Mutex::new(None));
+        let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let exit_status = std::sync::Arc::new(std::sync::Mutex::new(None));
 
-        tokio::spawn(reader_task(stdout, reader_tx.clone(), std::sync::Arc::clone(&thread_id)));
+        tokio::spawn(reader_task(
+            stdout,
+            reader_tx.clone(),
+            std::sync::Arc::clone(&thread_id),
+            std::sync::Arc::clone(&exited),
+        ));
         tokio::spawn(stderr_drain(stderr));
 
         Ok(CodexExecDriver {
             reader_rx,
             thread_id,
             child: Some(child),
+            exited,
+            exit_status,
         })
     }
 }
@@ -250,6 +286,7 @@ async fn reader_task(
     stdout: tokio::process::ChildStdout,
     tx: mpsc::Sender<AgentEvent>,
     thread_id: std::sync::Arc<Mutex<Option<String>>>,
+    exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     // Per-item delta tracking for streaming agent_message text.
@@ -270,16 +307,19 @@ async fn reader_task(
                 };
                 for ev in parse_codex_frame(&frame, &mut last_text_for, &thread_id).await {
                     if tx.send(ev).await.is_err() {
+                        exited.store(true, std::sync::atomic::Ordering::Relaxed);
                         return;
                     }
                 }
             }
             Ok(None) => {
                 debug!("codex reader: stdout EOF");
+                exited.store(true, std::sync::atomic::Ordering::Relaxed);
                 return;
             }
             Err(e) => {
                 warn!(error = %e, "codex reader: read error");
+                exited.store(true, std::sync::atomic::Ordering::Relaxed);
                 return;
             }
         }
@@ -368,8 +408,15 @@ async fn parse_codex_frame(
                 .unwrap_or_default()
                 .to_string();
             let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+            let cleanup_id = if kind == "item.completed"
+                && (item_type == "agent_message" || item_type == "reasoning")
+            {
+                Some(item_id.clone())
+            } else {
+                None
+            };
 
-            match item_type {
+            let events = match item_type {
                 "agent_message" => {
                     let text = item
                         .get("text")
@@ -430,10 +477,7 @@ async fn parse_codex_frame(
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_string();
-                        let status = item
-                            .get("status")
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
+                        let status = item.get("status").and_then(Value::as_str).unwrap_or("");
                         let is_error = !matches!(status, "completed" | "in_progress" | "");
                         vec![AgentEvent::ToolCallEnd {
                             call_id: item_id,
@@ -512,7 +556,16 @@ async fn parse_codex_frame(
                     trace!(item_type, "unknown codex item type, skipping");
                     Vec::new()
                 }
+            };
+
+            // Release per-item delta state once codex confirms the item is
+            // done — long sessions otherwise accumulate every agent_message
+            // and reasoning blob in memory until process exit.
+            if let Some(id) = cleanup_id {
+                last_text_for.remove(&id);
             }
+
+            events
         }
 
         other => {
@@ -545,7 +598,7 @@ fn codex_todo_to_plan_entry(idx: usize, entry: &Value) -> crate::core::PlanEntry
             .unwrap_or_else(|| format!("t{idx}")),
         content: text,
         status,
-        priority: PlanPriority::Medium,
+        priority: Some(PlanPriority::Medium),
     }
 }
 
@@ -566,6 +619,7 @@ fn parse_codex_usage(usage: Option<&Value>) -> Usage {
         cost_usd_estimate: None,
         duration: None,
         model_id: None,
+        stop_reason: Some(StopReason::EndTurn),
     }
 }
 
@@ -604,9 +658,10 @@ mod tests {
         let mut map = std::collections::HashMap::new();
         let tid = std::sync::Arc::new(Mutex::new(None));
 
-        let v1: Value =
-            serde_json::from_str(r#"{"type":"item.started","item":{"id":"i1","type":"agent_message","text":""}}"#)
-                .unwrap();
+        let v1: Value = serde_json::from_str(
+            r#"{"type":"item.started","item":{"id":"i1","type":"agent_message","text":""}}"#,
+        )
+        .unwrap();
         let _ = parse_codex_frame(&v1, &mut map, &tid).await;
 
         let v2: Value = serde_json::from_str(

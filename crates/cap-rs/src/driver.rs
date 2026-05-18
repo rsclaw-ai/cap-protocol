@@ -41,6 +41,37 @@ mod common {
 
         /// Shut down the agent process and release resources.
         async fn shutdown(&mut self) -> Result<(), DriverError>;
+
+        /// Whether the agent process is still running. Drivers SHOULD
+        /// return `false` after the underlying process exits, regardless of
+        /// whether `shutdown` was explicitly called.
+        ///
+        /// Default returns `true` for drivers that don't track liveness —
+        /// callers should not rely on this default to mean "alive".
+        fn is_alive(&self) -> bool {
+            true
+        }
+
+        /// Terminal exit status, if the agent has exited. `None` means
+        /// either the agent is still running, or the driver does not
+        /// surface exit codes (e.g. remote A2A bindings).
+        fn exit_status(&self) -> Option<DriverExitStatus> {
+            None
+        }
+    }
+
+    /// How an agent session terminated. Roughly mirrors `std::process::ExitStatus`
+    /// but is binding-agnostic so remote / non-process drivers (A2A) can use it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum DriverExitStatus {
+        /// Process exited on its own. `code = None` when killed by signal
+        /// on Unix without a numeric code.
+        Exited { code: Option<i32> },
+        /// Driver called shutdown / sent SIGKILL.
+        Killed,
+        /// Channel closed without an observable exit (network drop, pipe error).
+        Disconnected,
     }
 
     /// Driver-level errors.
@@ -75,4 +106,4 @@ mod common {
 }
 
 #[cfg(any(feature = "stream-json", feature = "pty", feature = "codex"))]
-pub use common::{Driver, DriverError};
+pub use common::{Driver, DriverError, DriverExitStatus};

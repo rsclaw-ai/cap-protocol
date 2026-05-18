@@ -9,7 +9,7 @@
 //! - **Claude Code** via `claude -p --input-format=stream-json --output-format=stream-json`
 //!
 //! openclaude and other Anthropic-SDK-compatible CLIs should also work
-//! with [`ClaudeCodeDriver::spawn_with`] pointing at their binary.
+//! with `ClaudeCodeDriver::builder(cwd).bin("openclaude").spawn()`.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, trace, warn};
 
 use crate::core::{AgentEvent, ClientFrame, Content, StopReason, TextChannel, Usage};
-use crate::driver::{Driver, DriverError};
+use crate::driver::{Driver, DriverError, DriverExitStatus};
 
 /// Driver that talks to the Claude Code CLI (or any stream-json compatible
 /// agent) via the SDK's `--input-format=stream-json --output-format=stream-json`
@@ -39,6 +39,13 @@ pub struct ClaudeCodeDriver {
 
     /// Child handle for lifecycle management.
     child: Option<Child>,
+
+    /// Set by the reader task on stdout EOF or by `shutdown`.
+    exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
+    /// Populated by `shutdown` after the child reaps, or by the reader
+    /// task with `Disconnected` if the channel dies before shutdown.
+    exit_status: std::sync::Arc<std::sync::Mutex<Option<DriverExitStatus>>>,
 }
 
 impl ClaudeCodeDriver {
@@ -77,7 +84,12 @@ impl ClaudeCodeDriver {
             session_id: None,
             resume: None,
             replay_user_messages: true,
-            dangerously_skip_permissions: true,
+            // Permission-bypass is opt-in. CAP spec §13.1 treats injected
+            // input as privileged, and the driver has no way to route
+            // claude's permission prompts back through CAP yet — so the
+            // safe default is to leave claude's prompting on. Callers that
+            // accept the trade-off invoke `.dangerously_skip_permissions(true)`.
+            dangerously_skip_permissions: false,
         }
     }
 
@@ -162,11 +174,18 @@ impl ClaudeCodeDriver {
         let (writer_tx, writer_rx) = mpsc::channel::<String>(32);
         let (reader_tx, reader_rx) = mpsc::channel::<AgentEvent>(64);
 
+        let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let exit_status = std::sync::Arc::new(std::sync::Mutex::new(None));
+
         // Writer task: forward queued lines to claude's stdin.
         tokio::spawn(writer_task(stdin, writer_rx));
 
         // Reader task: parse NDJSON from stdout into AgentEvents.
-        tokio::spawn(reader_task(stdout, reader_tx));
+        tokio::spawn(reader_task(
+            stdout,
+            reader_tx,
+            std::sync::Arc::clone(&exited),
+        ));
 
         // Stderr drain — log only, don't surface as events.
         tokio::spawn(stderr_drain(stderr));
@@ -175,6 +194,8 @@ impl ClaudeCodeDriver {
             writer_tx: Some(writer_tx),
             reader_rx,
             child: Some(child),
+            exited,
+            exit_status,
         })
     }
 }
@@ -261,11 +282,17 @@ impl ClaudeCodeDriverBuilder {
         self
     }
 
-    /// Whether to pass `--dangerously-skip-permissions` (default: `true`).
-    /// When `false`, claude will prompt for permission on tool calls;
-    /// the driver currently has no way to route those prompts back
-    /// through CAP — set this to `false` only if you don't care about
-    /// auto-approving (or you trust the agent to deny dangerous ops).
+    /// Whether to pass `--dangerously-skip-permissions` (default: `false`).
+    ///
+    /// When `false` (the safe default), claude prompts for permission on
+    /// tool calls — the driver does not currently forward those prompts
+    /// over CAP, so the agent simply blocks until a human intervenes
+    /// in the terminal claude is attached to.
+    ///
+    /// Set to `true` ONLY when you accept that the driver auto-approves
+    /// every tool call. Required for non-interactive batch use, but per
+    /// CAP spec §13.1 this is a privileged escalation — orchestrators
+    /// SHOULD gate the choice behind a user-visible policy.
     pub fn dangerously_skip_permissions(mut self, on: bool) -> Self {
         self.dangerously_skip_permissions = on;
         self
@@ -280,10 +307,7 @@ impl ClaudeCodeDriverBuilder {
 #[async_trait]
 impl Driver for ClaudeCodeDriver {
     async fn send(&mut self, frame: ClientFrame) -> Result<(), DriverError> {
-        let tx = self
-            .writer_tx
-            .as_ref()
-            .ok_or(DriverError::AgentExited)?;
+        let tx = self.writer_tx.as_ref().ok_or(DriverError::AgentExited)?;
         let line = encode_client_frame(&frame)?;
         trace!(line = %line, "→ claude");
         tx.send(line).await.map_err(|_| DriverError::AgentExited)?;
@@ -297,9 +321,33 @@ impl Driver for ClaudeCodeDriver {
     async fn shutdown(&mut self) -> Result<(), DriverError> {
         if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
-            let _ = child.wait().await;
+            let waited = child.wait().await;
+            let mut slot = self.exit_status.lock().expect("exit_status mutex poisoned");
+            if slot.is_none() {
+                *slot = Some(match waited {
+                    Ok(s) => {
+                        if let Some(code) = s.code() {
+                            DriverExitStatus::Exited { code: Some(code) }
+                        } else {
+                            // killed by signal
+                            DriverExitStatus::Killed
+                        }
+                    }
+                    Err(_) => DriverExitStatus::Disconnected,
+                });
+            }
         }
+        self.exited
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
+    }
+
+    fn is_alive(&self) -> bool {
+        !self.exited.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn exit_status(&self) -> Option<DriverExitStatus> {
+        self.exit_status.lock().ok().and_then(|g| g.clone())
     }
 }
 
@@ -307,10 +355,7 @@ impl Driver for ClaudeCodeDriver {
 // Writer / reader / stderr tasks
 // ---------------------------------------------------------------------------
 
-async fn writer_task(
-    mut stdin: tokio::process::ChildStdin,
-    mut rx: mpsc::Receiver<String>,
-) {
+async fn writer_task(mut stdin: tokio::process::ChildStdin, mut rx: mpsc::Receiver<String>) {
     while let Some(line) = rx.recv().await {
         if let Err(e) = stdin.write_all(line.as_bytes()).await {
             warn!(error = %e, "writer task: write failed, exiting");
@@ -324,7 +369,11 @@ async fn writer_task(
     debug!("writer task: input channel closed, exiting");
 }
 
-async fn reader_task(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<AgentEvent>) {
+async fn reader_task(
+    stdout: tokio::process::ChildStdout,
+    tx: mpsc::Sender<AgentEvent>,
+    exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     let mut lines = BufReader::new(stdout).lines();
     loop {
         match lines.next_line().await {
@@ -339,16 +388,19 @@ async fn reader_task(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<Agent
                 };
                 for event in parse_stream_frame(&value) {
                     if tx.send(event).await.is_err() {
+                        exited.store(true, std::sync::atomic::Ordering::Relaxed);
                         return;
                     }
                 }
             }
             Ok(None) => {
                 debug!("reader: stdout EOF");
+                exited.store(true, std::sync::atomic::Ordering::Relaxed);
                 return;
             }
             Err(e) => {
                 warn!(error = %e, "reader: read error");
+                exited.store(true, std::sync::atomic::Ordering::Relaxed);
                 return;
             }
         }
@@ -372,13 +424,13 @@ fn encode_client_frame(frame: &ClientFrame) -> Result<String, DriverError> {
             let parts: Vec<Value> = content
                 .iter()
                 .map(|c| match c {
-                    Content::Text(t) => json!({"type": "text", "text": t}),
+                    Content::Text { text } => json!({"type": "text", "text": text}),
                     Content::Image { mime, data } => json!({
                         "type": "image",
                         "source": {
                             "type": "base64",
                             "media_type": mime,
-                            "data": base64_encode(data),
+                            "data": base64_encode(data.as_ref()),
                         }
                     }),
                 })
@@ -392,11 +444,26 @@ fn encode_client_frame(frame: &ClientFrame) -> Result<String, DriverError> {
             });
             Ok(frame_json.to_string())
         }
-        ClientFrame::Cancel => {
-            // Claude SDK has no in-band cancel — use shutdown() instead.
-            // We emit a benign frame to satisfy the channel; the higher
-            // layer should call shutdown().
-            Ok(json!({"type": "control", "subtype": "cancel"}).to_string())
+        ClientFrame::Cancel { .. } => {
+            // Claude SDK has no in-band cancel — callers should invoke
+            // [`Driver::shutdown`] instead. We surface this as a typed
+            // error matching spec §14.2 `-32008 cap_cancel_unsupported`
+            // rather than smuggling a no-op frame onto the wire.
+            Err(DriverError::AgentError {
+                code: "cap_cancel_unsupported".into(),
+                message: "stream-json binding has no in-band cancel; call Driver::shutdown".into(),
+            })
+        }
+        ClientFrame::SessionConfig(_) => {
+            // The stream-json driver consumes SessionConfig via the builder
+            // at spawn time; an in-band frame after the session is running
+            // has no equivalent on the Claude SDK wire. Surface explicitly.
+            Err(DriverError::AgentError {
+                code: "cap_session_config_inline_unsupported".into(),
+                message:
+                    "stream-json builder consumes SessionConfig at spawn — re-spawn to change it"
+                        .into(),
+            })
         }
         ClientFrame::AskUserAnswer { ask_id, value } => {
             // Map to a text continuation. Claude doesn't have a native
@@ -436,10 +503,7 @@ fn parse_stream_frame(frame: &Value) -> Vec<AgentEvent> {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
-                model: frame
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .map(String::from),
+                model: frame.get("model").and_then(Value::as_str).map(String::from),
             }],
             _ => vec![],
         },
@@ -545,13 +609,7 @@ fn parse_stream_frame(frame: &Value) -> Vec<AgentEvent> {
 
         "result" => {
             let usage = parse_usage(frame);
-            let stop_reason = match frame.get("subtype").and_then(Value::as_str) {
-                Some("success") => StopReason::EndTurn,
-                Some("error_max_turns") => StopReason::MaxTokens,
-                Some("error_during_execution") => StopReason::Error,
-                Some(other) if other.starts_with("error") => StopReason::Error,
-                _ => StopReason::EndTurn,
-            };
+            let stop_reason = usage.stop_reason.unwrap_or(StopReason::EndTurn);
             vec![AgentEvent::Done { stop_reason, usage }]
         }
 
@@ -582,6 +640,15 @@ fn extract_tool_result_output(block: &Value) -> String {
 
 fn parse_usage(frame: &Value) -> Usage {
     let u = frame.get("usage").cloned().unwrap_or(Value::Null);
+    let stop_reason = frame
+        .get("subtype")
+        .and_then(Value::as_str)
+        .map(|s| match s {
+            "success" => StopReason::EndTurn,
+            "error_max_turns" => StopReason::MaxTokens,
+            s if s.starts_with("error") => StopReason::Error,
+            _ => StopReason::EndTurn,
+        });
     Usage {
         input_tokens: u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0),
         output_tokens: u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0),
@@ -599,41 +666,27 @@ fn parse_usage(frame: &Value) -> Usage {
             .get("duration_ms")
             .and_then(Value::as_u64)
             .map(std::time::Duration::from_millis),
+        // `modelUsage` is a map keyed by model_id with per-model usage —
+        // pick the entry with the most output tokens rather than the
+        // dictionary's first key, which would be insertion-order-dependent
+        // and effectively random when multiple models served the turn.
         model_id: frame
             .get("modelUsage")
             .and_then(Value::as_object)
-            .and_then(|m| m.keys().next().cloned()),
+            .and_then(|m| {
+                m.iter()
+                    .max_by_key(|(_, v)| {
+                        v.get("output_tokens").and_then(Value::as_u64).unwrap_or(0)
+                    })
+                    .map(|(k, _)| k.clone())
+            }),
+        stop_reason,
     }
 }
 
-// Tiny base64 — pulled in to avoid an extra dep for the rare image case.
-fn base64_encode(data: &[u8]) -> String {
-    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(((data.len() + 2) / 3) * 4);
-    let mut i = 0;
-    while i + 3 <= data.len() {
-        let b = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8) | (data[i + 2] as u32);
-        out.push(T[((b >> 18) & 63) as usize] as char);
-        out.push(T[((b >> 12) & 63) as usize] as char);
-        out.push(T[((b >> 6) & 63) as usize] as char);
-        out.push(T[(b & 63) as usize] as char);
-        i += 3;
-    }
-    let rem = data.len() - i;
-    if rem == 1 {
-        let b = (data[i] as u32) << 16;
-        out.push(T[((b >> 18) & 63) as usize] as char);
-        out.push(T[((b >> 12) & 63) as usize] as char);
-        out.push_str("==");
-    } else if rem == 2 {
-        let b = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8);
-        out.push(T[((b >> 18) & 63) as usize] as char);
-        out.push(T[((b >> 12) & 63) as usize] as char);
-        out.push(T[((b >> 6) & 63) as usize] as char);
-        out.push('=');
-    }
-    out
-}
+// base64 implementation lives in `crate::core::base64` so the serde adapter
+// for Content::Image shares the same encoder.
+use crate::core::base64::encode as base64_encode;
 
 #[cfg(test)]
 mod tests {
@@ -701,11 +754,38 @@ mod tests {
     #[test]
     fn encode_simple_prompt() {
         let frame = ClientFrame::Prompt {
-            content: vec![Content::Text("hi".into())],
+            content: vec![Content::text("hi")],
         };
         let line = encode_client_frame(&frame).unwrap();
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["type"], "user");
         assert_eq!(v["message"]["content"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn base64_rfc4648_vectors() {
+        // RFC 4648 §10 standard test vectors.
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+
+        // Binary edge cases.
+        assert_eq!(base64_encode(&[0u8; 3]), "AAAA");
+        assert_eq!(base64_encode(&[0xffu8; 3]), "////");
+
+        // Every byte value 0..=255 should round through cleanly.
+        let all_bytes: Vec<u8> = (0u8..=255).collect();
+        let encoded = base64_encode(&all_bytes);
+        // ceil(256/3)*4 = 344.
+        assert_eq!(encoded.len(), 344);
+        assert!(
+            encoded
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        );
     }
 }
