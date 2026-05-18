@@ -67,6 +67,11 @@ path = "examples/claude_hello.rs"
 required-features = ["stream-json"]
 
 [[example]]
+name = "claude_chat"
+path = "examples/claude_chat.rs"
+required-features = ["stream-json"]
+
+[[example]]
 name = "pty_hello"
 path = "examples/pty_hello.rs"
 required-features = ["pty"]

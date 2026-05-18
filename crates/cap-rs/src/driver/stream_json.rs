@@ -58,30 +58,70 @@ impl ClaudeCodeDriver {
 impl ClaudeCodeDriver {
     /// Spawn a fresh Claude Code session in the given working directory,
     /// using the binary on PATH (or `$CLAUDE_BIN` env override).
+    ///
+    /// Defaults to **persistent session mode** via `--replay-user-messages`
+    /// — one claude process serves an unbounded number of turns. Call
+    /// [`Self::finish_input`] when you're done so claude can exit
+    /// gracefully. For multi-turn use, just keep calling
+    /// [`Driver::send`].
     pub async fn spawn(cwd: impl AsRef<Path>) -> Result<Self, DriverError> {
-        let bin = std::env::var("CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
-        Self::spawn_with(&bin, cwd, None).await
+        Self::builder(cwd).spawn().await
     }
 
-    /// Spawn with a specific binary path and optional model selection.
-    pub async fn spawn_with(
-        bin: &str,
-        cwd: impl AsRef<Path>,
-        model: Option<&str>,
-    ) -> Result<Self, DriverError> {
-        let cwd: PathBuf = cwd.as_ref().to_path_buf();
+    /// Begin building a Claude Code session with custom options.
+    pub fn builder(cwd: impl AsRef<Path>) -> ClaudeCodeDriverBuilder {
+        ClaudeCodeDriverBuilder {
+            bin: None,
+            cwd: cwd.as_ref().to_path_buf(),
+            model: None,
+            session_id: None,
+            resume: None,
+            replay_user_messages: true,
+            dangerously_skip_permissions: true,
+        }
+    }
 
-        let mut cmd = Command::new(bin);
+    async fn spawn_inner(b: ClaudeCodeDriverBuilder) -> Result<Self, DriverError> {
+        let ClaudeCodeDriverBuilder {
+            bin,
+            cwd,
+            model,
+            session_id,
+            resume,
+            replay_user_messages,
+            dangerously_skip_permissions,
+        } = b;
+
+        let bin = bin
+            .or_else(|| std::env::var("CLAUDE_BIN").ok())
+            .unwrap_or_else(|| "claude".to_string());
+
+        let mut cmd = Command::new(&bin);
         cmd.arg("-p")
             .arg("--input-format=stream-json")
             .arg("--output-format=stream-json")
             .arg("--verbose")
-            .arg("--dangerously-skip-permissions")
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+
+        if dangerously_skip_permissions {
+            cmd.arg("--dangerously-skip-permissions");
+        }
+        if replay_user_messages {
+            cmd.arg("--replay-user-messages");
+        }
+        if let Some(m) = &model {
+            cmd.arg("--model").arg(m);
+        }
+        if let Some(sid) = &session_id {
+            cmd.arg("--session-id").arg(sid);
+        }
+        if let Some(rid) = &resume {
+            cmd.arg("--resume").arg(rid);
+        }
 
         // Strip parent-session env vars so claude doesn't refuse to launch
         // when cap-rs itself is running inside another Claude Code session.
@@ -98,15 +138,18 @@ impl ClaudeCodeDriver {
             cmd.env_remove(var);
         }
 
-        if let Some(m) = model {
-            cmd.arg("--model").arg(m);
-        }
-
-        debug!(bin = %bin, cwd = %cwd.display(), "spawning claude");
+        debug!(
+            bin = %bin,
+            cwd = %cwd.display(),
+            session_mode = replay_user_messages,
+            resume = ?resume,
+            session_id = ?session_id,
+            "spawning claude",
+        );
 
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                DriverError::BinaryNotFound(bin.into())
+                DriverError::BinaryNotFound(bin.clone())
             } else {
                 DriverError::SpawnFailed(e)
             }
@@ -133,6 +176,104 @@ impl ClaudeCodeDriver {
             reader_rx,
             child: Some(child),
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Builder
+// ---------------------------------------------------------------------------
+
+/// Fluent configuration for [`ClaudeCodeDriver`].
+///
+/// ```no_run
+/// # async fn run() -> anyhow::Result<()> {
+/// use cap_rs::driver::stream_json::ClaudeCodeDriver;
+///
+/// // Persistent multi-turn session (default).
+/// let chat = ClaudeCodeDriver::builder("/path/to/workspace").spawn().await?;
+///
+/// // One-shot, with a specific model.
+/// let oneshot = ClaudeCodeDriver::builder(".")
+///     .model("claude-opus-4-7")
+///     .replay_user_messages(false)
+///     .spawn()
+///     .await?;
+///
+/// // Resume an earlier session.
+/// let resumed = ClaudeCodeDriver::builder(".")
+///     .resume("00000000-0000-0000-0000-deadbeefcafe")
+///     .spawn()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct ClaudeCodeDriverBuilder {
+    bin: Option<String>,
+    cwd: PathBuf,
+    model: Option<String>,
+    session_id: Option<String>,
+    resume: Option<String>,
+    replay_user_messages: bool,
+    dangerously_skip_permissions: bool,
+}
+
+impl ClaudeCodeDriverBuilder {
+    /// Override the binary used (default: `claude` on PATH, or `$CLAUDE_BIN`).
+    pub fn bin(mut self, bin: impl Into<String>) -> Self {
+        self.bin = Some(bin.into());
+        self
+    }
+
+    /// Override the model (default: claude's own default).
+    pub fn model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    /// Use a specific session UUID for this session (must be a valid UUID
+    /// per claude's `--session-id` requirements). If unset, claude
+    /// generates one and reports it in the `Ready` event.
+    pub fn session_id(mut self, uuid: impl Into<String>) -> Self {
+        self.session_id = Some(uuid.into());
+        self
+    }
+
+    /// Resume a previously persisted conversation by session UUID. Pass
+    /// the `session_id` you got from a prior session's `Ready` event.
+    pub fn resume(mut self, uuid: impl Into<String>) -> Self {
+        self.resume = Some(uuid.into());
+        self
+    }
+
+    /// Whether to start in **persistent session mode** (default: `true`).
+    ///
+    /// When `true`, claude stays alive after each turn waiting for more
+    /// user messages — this is what enables real-time multi-turn
+    /// conversation in a single process. When `false`, claude reads one
+    /// prompt, responds, and exits (one-shot, lower latency to first
+    /// answer but no follow-ups in the same process).
+    ///
+    /// Implementation note: this maps directly to claude's
+    /// `--replay-user-messages` flag.
+    pub fn replay_user_messages(mut self, on: bool) -> Self {
+        self.replay_user_messages = on;
+        self
+    }
+
+    /// Whether to pass `--dangerously-skip-permissions` (default: `true`).
+    /// When `false`, claude will prompt for permission on tool calls;
+    /// the driver currently has no way to route those prompts back
+    /// through CAP — set this to `false` only if you don't care about
+    /// auto-approving (or you trust the agent to deny dangerous ops).
+    pub fn dangerously_skip_permissions(mut self, on: bool) -> Self {
+        self.dangerously_skip_permissions = on;
+        self
+    }
+
+    /// Spawn the configured Claude Code session.
+    pub async fn spawn(self) -> Result<ClaudeCodeDriver, DriverError> {
+        ClaudeCodeDriver::spawn_inner(self).await
     }
 }
 
