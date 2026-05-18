@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/cap-rs",
+    "crates/cap-rs-core",
+    "crates/cap-rs-pty",
+    "crates/cap-rs-stream-json",
+    "crates/cap-rs-acp",
+    "crates/cap-rs-a2a",
+    "crates/cap-rs-grpc",
+    "crates/cap-rs-orchestrator",
+    "crates/cap-cli",
+]
+
+[workspace.package]
+version      = "0.0.0"
+edition      = "2024"
+rust-version = "1.85"
+authors      = ["rsclaw <team@rsclaw.ai>"]
+homepage     = "https://cap-protocol.org"
+repository   = "https://github.com/rsclaw-ai/cap-protocol"
+license      = "MIT"
+keywords     = ["cap", "agent", "protocol", "cli"]
+categories   = ["development-tools", "command-line-utilities"]
+
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+strip         = "symbols"

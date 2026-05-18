@@ -1,0 +1,17 @@
+[package]
+name        = "cap-cli"
+description = "cap command-line tool — discover, drive, and orchestrate CLI AI agents."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+license.workspace      = true
+keywords.workspace     = true
+categories.workspace   = true
+readme = "README.md"
+
+[[bin]]
+name = "cap"
+path = "src/main.rs"
