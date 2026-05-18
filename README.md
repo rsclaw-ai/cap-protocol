@@ -69,12 +69,15 @@ cap-protocol/
 │   ├── favicon.svg
 │   └── README.md                       Local preview + deploy instructions
 ├── crates/                             Reference Rust implementation (planned)
-│   ├── cap-core/                       Protocol types + manifest parser
-│   ├── cap-pty-driver/                 Universal PTY-based driver
-│   ├── cap-stream-json-driver/         Fast-path for Claude SDK / openclaude
-│   ├── cap-acp-driver/                 Fast-path for ACP-stdio agents
-│   ├── cap-a2a-binding/                A2A HTTPS+SSE binding (both directions)
-│   └── cap-cli/                        `cap` CLI tool
+│   ├── cap-rs/                         Facade — one-line dep that re-exports
+│   ├── cap-rs-core/                    Protocol types + manifest parser
+│   ├── cap-rs-pty/                     Universal PTY-based driver
+│   ├── cap-rs-stream-json/             Fast-path: Claude SDK / openclaude
+│   ├── cap-rs-acp/                     Fast-path: ACP-stdio agents (Zed-compat)
+│   ├── cap-rs-a2a/                     A2A HTTPS+SSE binding (both directions)
+│   ├── cap-rs-grpc/                    Fast-path: gRPC agents (openclaude-style)
+│   ├── cap-rs-orchestrator/            Multi-agent coordination layer
+│   └── cap-cli/                        `cap` CLI binary
 ├── examples/                           Reference manifests (planned)
 │   ├── claude-code.toml
 │   ├── aider.toml
