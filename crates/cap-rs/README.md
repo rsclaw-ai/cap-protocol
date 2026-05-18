@@ -125,20 +125,23 @@ let driver = ClaudeCodeDriver::builder(".")
 ### Drive any CLI agent through PTY
 
 ```rust
-use cap_rs::driver::pty::{PtyDriver, RawParser};
+use cap_rs::driver::pty::{PtyDriver, ReplParser};
 use cap_rs::driver::Driver;
 use cap_rs::core::{AgentEvent, ClientFrame, Content};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // aider is a prompt-delimited REPL — `ReplParser::aider` knows to
+    // emit `Done` when the `>` prompt re-appears, and to surface
+    // `[Y/n]` confirmations as `AskUser` events.
     let mut driver = PtyDriver::builder("aider")
         .cwd(".")
         .size(50, 200)
         .env_remove("CLAUDECODE")   // avoid nesting if cap-rs runs inside Claude Code
-        .spawn(RawParser)?;
+        .spawn(ReplParser::aider())?;
 
     driver.send(ClientFrame::Prompt {
-        content: vec![Content::Text("show me a hello world in Rust".into())],
+        content: vec![Content::text("show me a hello world in Rust")],
     }).await?;
 
     while let Some(event) = driver.next_event().await {
@@ -153,9 +156,11 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-`RawParser` emits raw bytes (ANSI escapes pass through). For
-agent-specific structured events, implement the [`AgentParser`] trait;
-example parsers ship in `cap_rs::driver::pty`.
+For agents without a stable prompt, `RawParser` passes every chunk of
+bytes through unmodified (ANSI escapes included); `VtPlainParser` runs
+output through a VT100 emulator so you get only the rendered text.
+Custom parsers can also be plugged in by implementing the
+[`AgentParser`] trait.
 
 ## Examples in the repo
 
