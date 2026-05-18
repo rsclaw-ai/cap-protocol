@@ -580,6 +580,22 @@ when starting a session.
 }
 ```
 
+### 7.11 `cap.error`
+
+For non-fatal errors. Fatal errors terminate the session.
+
+```jsonc
+{
+  "kind": "cap.error",
+  "code": "rate_limit",
+  "message": "...",
+  "retryable": true,
+  "details": {}
+}
+```
+
+Standard error codes are listed in §13.2.
+
 ### 7.12 `cap.pty.raw_bytes` (OPTIONAL, PTY binding only)
 
 Raw byte stream from the agent's PTY master — the same bytes the
@@ -599,22 +615,6 @@ state.
 
 `bytes_b64` is the base64-encoded chunk. Order of events MUST match
 the order in which bytes arrived from the PTY master.
-
-### 7.11 `cap.error`
-
-For non-fatal errors. Fatal errors terminate the session.
-
-```jsonc
-{
-  "kind": "cap.error",
-  "code": "rate_limit",
-  "message": "...",
-  "retryable": true,
-  "details": {}
-}
-```
-
-Standard error codes are listed in §13.2.
 
 ## 8. Core Reverse RPC
 

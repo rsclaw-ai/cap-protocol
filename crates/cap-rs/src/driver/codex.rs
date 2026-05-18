@@ -7,10 +7,10 @@
 //! - **Thread/turn lifecycle**: `thread.started`, `turn.started`,
 //!   `turn.completed` (with usage), `turn.failed`, `error`.
 //! - **Items**: `item.started`, `item.updated`, `item.completed`, each
-//!   carrying a [`ThreadItem`] whose `type` discriminates among
-//!   `agent_message`, `reasoning`, `command_execution`, `file_change`,
-//!   `mcp_tool_call`, `collab_tool_call`, `web_search`, `todo_list`,
-//!   `error`.
+//!   carrying a `ThreadItem` (codex-rs side) whose `type` discriminates
+//!   among `agent_message`, `reasoning`, `command_execution`,
+//!   `file_change`, `mcp_tool_call`, `collab_tool_call`, `web_search`,
+//!   `todo_list`, `error`.
 //!
 //! Codex `exec` is one-shot per process — for multi-turn conversations
 //! the same `thread_id` is reused across spawns (`codex exec resume
