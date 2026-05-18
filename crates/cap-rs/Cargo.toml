@@ -28,8 +28,8 @@ path = "src/lib.rs"
 [features]
 default      = ["pty"]
 
-pty          = []
-stream-json  = ["dep:serde", "dep:serde_json", "dep:tokio", "dep:tokio-util", "dep:async-trait", "dep:thiserror", "dep:tracing", "dep:futures"]
+pty          = ["dep:portable-pty", "dep:vt100", "dep:tokio", "dep:async-trait", "dep:thiserror", "dep:tracing"]
+stream-json  = ["dep:tokio", "dep:tokio-util", "dep:async-trait", "dep:thiserror", "dep:tracing", "dep:futures"]
 acp          = []
 a2a          = []
 grpc         = []
@@ -38,14 +38,23 @@ orchestrator = []
 full         = ["pty", "stream-json", "acp", "a2a", "grpc", "orchestrator"]
 
 [dependencies]
-serde       = { version = "1", features = ["derive"], optional = true }
-serde_json  = { version = "1",                          optional = true }
-tokio       = { version = "1", features = ["process", "io-util", "rt", "rt-multi-thread", "macros", "sync"], optional = true }
-tokio-util  = { version = "0.7", features = ["codec"],  optional = true }
-async-trait = { version = "0.1",                        optional = true }
-thiserror   = { version = "2",                          optional = true }
-tracing     = { version = "0.1",                        optional = true }
-futures     = { version = "0.3",                        optional = true }
+# Always-on: used by core types regardless of features.
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+
+# Driver-base: pulled in by any backend feature.
+tokio        = { version = "1", features = ["process", "io-util", "rt", "rt-multi-thread", "macros", "sync"], optional = true }
+async-trait  = { version = "0.1",                        optional = true }
+thiserror    = { version = "2",                          optional = true }
+tracing      = { version = "0.1",                        optional = true }
+
+# stream-json specific.
+tokio-util   = { version = "0.7", features = ["codec"],  optional = true }
+futures      = { version = "0.3",                        optional = true }
+
+# pty specific.
+portable-pty = { version = "0.9",                        optional = true }
+vt100        = { version = "0.16",                       optional = true }
 
 [dev-dependencies]
 anyhow = "1.0.102"
@@ -56,3 +65,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 name = "claude_hello"
 path = "examples/claude_hello.rs"
 required-features = ["stream-json"]
+
+[[example]]
+name = "pty_hello"
+path = "examples/pty_hello.rs"
+required-features = ["pty"]
