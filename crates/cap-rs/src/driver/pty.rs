@@ -144,6 +144,211 @@ impl AgentParser for VtPlainParser {
 }
 
 // ---------------------------------------------------------------------------
+// ReplParser — REPL / prompt-delimited agents (aider, python, plandex, …)
+// ---------------------------------------------------------------------------
+
+/// Parser for prompt-delimited REPL-style agents. Strips ANSI via
+/// [`vt100`], buffers text by line, and treats a configurable prompt
+/// pattern as a turn boundary:
+///
+/// - Output **between** prompts is emitted as [`AgentEvent::TextChunk`].
+/// - When the prompt re-appears on the current line, a synthetic
+///   [`AgentEvent::Done`] is emitted (turn boundary).
+/// - A configurable yes-no question regex emits
+///   [`AgentEvent::AskUser`].
+///
+/// Ships with constructors for common REPLs:
+///
+/// - [`ReplParser::aider`] — `> ` prompt, `\? .*\[Y/n\]` confirmation
+/// - [`ReplParser::python_repl`] — `>>> ` prompt, `... ` continuation
+/// - [`ReplParser::generic_repl`] — simple `> ` or `❯ ` prompts
+pub struct ReplParser {
+    name: &'static str,
+    vt: vt100::Parser,
+    /// Plain (ANSI-stripped) buffer of bytes since the last turn boundary.
+    buffer: String,
+    /// Where to start scanning on next on_bytes call (to avoid re-scanning
+    /// already-emitted text).
+    emit_cursor: usize,
+    prompts: Vec<regex_lite::Regex>,
+    ask_yes_no: Option<regex_lite::Regex>,
+    /// Have we seen a prompt yet (first prompt = "ready", subsequent = "done")
+    seen_first_prompt: bool,
+    /// Tag for synthesized event message_id, monotonic per turn.
+    turn: u64,
+}
+
+impl std::fmt::Debug for ReplParser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplParser")
+            .field("name", &self.name)
+            .field("buffered", &self.buffer.len())
+            .field("turn", &self.turn)
+            .finish()
+    }
+}
+
+impl ReplParser {
+    /// Build a parser for an `aider` session.
+    pub fn aider() -> Self {
+        Self::new(
+            "aider",
+            &[r"^>\s*$"],            // top-level ">"
+            Some(r"\?\s*\[Y/n\]\s*$"), // "(Y/n)" confirmation
+        )
+    }
+
+    /// Build a parser for `python3 -i` / `python` interactive REPL.
+    pub fn python_repl() -> Self {
+        Self::new(
+            "python-repl",
+            &[r"^>>>\s*$", r"^\.\.\.\s*$"],
+            None,
+        )
+    }
+
+    /// Build a parser for any generic REPL using `> ` or `❯ ` prompts.
+    pub fn generic_repl() -> Self {
+        Self::new(
+            "generic-repl",
+            &[r"^>\s*$", r"^❯\s*$"],
+            None,
+        )
+    }
+
+    /// Custom constructor — give your own prompt regexes (anchored on
+    /// the start of a logical line) and an optional yes/no detector.
+    pub fn new(
+        name: &'static str,
+        prompts: &[&str],
+        ask_yes_no: Option<&str>,
+    ) -> Self {
+        let prompts = prompts
+            .iter()
+            .map(|p| regex_lite::Regex::new(p).expect("invalid prompt regex"))
+            .collect();
+        let ask_yes_no = ask_yes_no.map(|p| regex_lite::Regex::new(p).expect("invalid regex"));
+        Self {
+            name,
+            vt: vt100::Parser::new(50, 200, 10_000),
+            buffer: String::new(),
+            emit_cursor: 0,
+            prompts,
+            ask_yes_no,
+            seen_first_prompt: false,
+            turn: 0,
+        }
+    }
+
+    fn current_screen(&mut self) -> String {
+        self.vt.screen().contents()
+    }
+}
+
+impl AgentParser for ReplParser {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn on_bytes(&mut self, bytes: &[u8]) -> Vec<AgentEvent> {
+        self.vt.process(bytes);
+        let screen = self.current_screen();
+        // We work on the rendered screen, taking append-only deltas.
+        if !screen.starts_with(&self.buffer) {
+            // Screen scrolled / repainted. Reset buffer to current screen.
+            self.buffer = screen.clone();
+            self.emit_cursor = screen.len();
+            return Vec::new();
+        }
+        let delta = screen[self.buffer.len()..].to_string();
+        if delta.is_empty() {
+            return Vec::new();
+        }
+        self.buffer = screen;
+
+        // Walk the delta line by line. Detect prompts on a logical-line
+        // basis; emit text in between and synthetic events at boundaries.
+        let mut events = Vec::new();
+        let mut last_line_was_prompt = false;
+
+        // Compose: emit only complete lines (terminated by \n). Carry
+        // over any trailing partial line by NOT moving emit_cursor past it.
+        let region = &self.buffer[self.emit_cursor..];
+        let mut consumed = 0usize;
+        for line in region.split_inclusive('\n') {
+            // Trim trailing newline for matching but include in the emit.
+            let trimmed = line.trim_end_matches(|c: char| c == '\n' || c == '\r');
+            let is_prompt = self.prompts.iter().any(|re| re.is_match(trimmed));
+            let is_yesno = self
+                .ask_yes_no
+                .as_ref()
+                .map(|re| re.is_match(trimmed))
+                .unwrap_or(false);
+
+            if is_prompt {
+                if self.seen_first_prompt {
+                    // Turn boundary.
+                    events.push(AgentEvent::Done {
+                        stop_reason: StopReason::EndTurn,
+                        usage: Usage::default(),
+                    });
+                    self.turn += 1;
+                } else {
+                    self.seen_first_prompt = true;
+                    events.push(AgentEvent::Ready {
+                        session_id: format!("{}-pid{}", self.name, std::process::id()),
+                        model: None,
+                    });
+                }
+                last_line_was_prompt = true;
+                consumed += line.len();
+                continue;
+            }
+            if is_yesno {
+                events.push(AgentEvent::AskUser {
+                    ask_id: format!("ask_{}", self.turn),
+                    prompt: trimmed.to_string(),
+                    kind: crate::core::AskKind::YesNo,
+                    options: Vec::new(),
+                });
+                consumed += line.len();
+                continue;
+            }
+            // Ordinary content — emit as TextChunk.
+            if !trimmed.is_empty() || !last_line_was_prompt {
+                events.push(AgentEvent::TextChunk {
+                    msg_id: format!("turn_{}", self.turn),
+                    text: line.to_string(),
+                    channel: TextChannel::Assistant,
+                });
+            }
+            last_line_was_prompt = false;
+            consumed += line.len();
+        }
+        self.emit_cursor += consumed;
+        events
+    }
+
+    fn on_eof(&mut self) -> Vec<AgentEvent> {
+        // Flush any remaining buffered partial line.
+        let mut events = Vec::new();
+        let tail = self.buffer[self.emit_cursor..].to_string();
+        if !tail.is_empty() {
+            events.push(AgentEvent::TextChunk {
+                msg_id: format!("turn_{}", self.turn),
+                text: tail,
+                channel: TextChannel::Assistant,
+            });
+        }
+        events.push(AgentEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        });
+        events
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PtyDriver
 // ---------------------------------------------------------------------------
 

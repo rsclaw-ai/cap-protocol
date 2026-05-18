@@ -32,7 +32,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default      = ["pty"]
 
-pty          = ["dep:portable-pty", "dep:vt100", "dep:tokio", "dep:async-trait", "dep:thiserror", "dep:tracing"]
+pty          = ["dep:portable-pty", "dep:vt100", "dep:regex-lite", "dep:tokio", "dep:async-trait", "dep:thiserror", "dep:tracing"]
 stream-json  = ["dep:tokio", "dep:tokio-util", "dep:async-trait", "dep:thiserror", "dep:tracing", "dep:futures"]
 acp          = []
 a2a          = []
@@ -59,6 +59,7 @@ futures      = { version = "0.3",                        optional = true }
 # pty specific.
 portable-pty = { version = "0.9",                        optional = true }
 vt100        = { version = "0.16",                       optional = true }
+regex-lite   = { version = "0.1",                        optional = true }
 
 [dev-dependencies]
 anyhow = "1.0.102"
@@ -78,4 +79,9 @@ required-features = ["stream-json"]
 [[example]]
 name = "pty_hello"
 path = "examples/pty_hello.rs"
+required-features = ["pty"]
+
+[[example]]
+name = "repl_hello"
+path = "examples/repl_hello.rs"
 required-features = ["pty"]
