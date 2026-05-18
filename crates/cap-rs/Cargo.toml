@@ -34,12 +34,13 @@ default      = ["pty"]
 
 pty          = ["dep:portable-pty", "dep:vt100", "dep:regex-lite", "dep:tokio", "dep:async-trait", "dep:thiserror", "dep:tracing"]
 stream-json  = ["dep:tokio", "dep:tokio-util", "dep:async-trait", "dep:thiserror", "dep:tracing", "dep:futures"]
+codex        = ["dep:tokio", "dep:async-trait", "dep:thiserror", "dep:tracing"]
 acp          = []
 a2a          = []
 grpc         = []
 orchestrator = []
 
-full         = ["pty", "stream-json", "acp", "a2a", "grpc", "orchestrator"]
+full         = ["pty", "stream-json", "codex", "acp", "a2a", "grpc", "orchestrator"]
 
 [dependencies]
 # Always-on: used by core types regardless of features.
@@ -85,3 +86,8 @@ required-features = ["pty"]
 name = "repl_hello"
 path = "examples/repl_hello.rs"
 required-features = ["pty"]
+
+[[example]]
+name = "codex_hello"
+path = "examples/codex_hello.rs"
+required-features = ["codex"]

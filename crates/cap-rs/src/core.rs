@@ -143,6 +143,10 @@ pub struct Usage {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
+    /// Reasoning / "thinking" tokens — separate from output for models that
+    /// distinguish hidden reasoning from visible output (Codex's
+    /// `reasoning_output_tokens`, Claude's `thinking_tokens`).
+    pub thinking_tokens: u64,
     pub cost_usd_estimate: Option<f64>,
     pub duration: Option<Duration>,
     pub model_id: Option<String>,

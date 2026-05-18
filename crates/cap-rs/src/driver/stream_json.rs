@@ -593,6 +593,7 @@ fn parse_usage(frame: &Value) -> Usage {
             .get("cache_creation_input_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0),
+        thinking_tokens: 0,
         cost_usd_estimate: frame.get("total_cost_usd").and_then(Value::as_f64),
         duration: frame
             .get("duration_ms")

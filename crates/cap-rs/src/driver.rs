@@ -10,6 +10,9 @@ pub mod stream_json;
 #[cfg(feature = "pty")]
 pub mod pty;
 
+#[cfg(feature = "codex")]
+pub mod codex;
+
 // Future modules — gated on their respective features:
 // #[cfg(feature = "acp")]          pub mod acp;
 // #[cfg(feature = "a2a")]          pub mod a2a;
@@ -20,7 +23,7 @@ pub mod pty;
 // They're gated on `any(stream-json, pty, ...)` because their deps
 // (async-trait, thiserror) come in via those features.
 
-#[cfg(any(feature = "stream-json", feature = "pty"))]
+#[cfg(any(feature = "stream-json", feature = "pty", feature = "codex"))]
 mod common {
     use crate::core::{AgentEvent, ClientFrame};
 
@@ -71,5 +74,5 @@ mod common {
     }
 }
 
-#[cfg(any(feature = "stream-json", feature = "pty"))]
+#[cfg(any(feature = "stream-json", feature = "pty", feature = "codex"))]
 pub use common::{Driver, DriverError};
