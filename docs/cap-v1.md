@@ -104,8 +104,19 @@ An Orchestrator conforms to CAP v1 if:
 
 ### 3.3 Driver conformance
 
-A Driver conforms to CAP v1 if it implements at least one binding
-(§6) and emits Core Events (§7) faithfully to that binding's contract.
+A Driver conforms to CAP v1 if it:
+
+1. Implements at least one binding (§6).
+2. Emits Core Events (§7) faithfully to that binding's contract.
+3. Accepts `cap.session.config` (§7.10) as the first frame and
+   applies its `cwd`, `model`, `permission_mode`, and other fields
+   before spawning or after a binding-specific handshake.
+4. Surfaces `cap.permission.request` events with a non-omitted
+   `risk_level` (§7.6) whenever the bound agent exposes a way to
+   negotiate permission.
+5. Authenticates the source of every inbound `cap.user_input.inject`
+   per §13.1 — injected input MUST come from the same Orchestrator
+   that owns the session, not from an external caller.
 
 ## 4. Identifiers and Versioning
 
@@ -147,7 +158,10 @@ version_pattern = "claude-code/(\\d+\\.\\d+)"
 
 [startup]
 command = ["claude"]                    # additional args appended by driver
-cwd_arg = "--cwd"                       # how to inject working directory
+# cwd_arg is OPTIONAL — when omitted (as is the case for claude), the
+# Driver sets the child process's working directory directly. Provide
+# only if the Agent's binary insists on a flag.
+# cwd_arg = "--workspace"
 model_arg = "--model"                   # how to inject model selection
 session_id_env = "CLAUDE_SESSION_ID"    # how to inject session id (optional)
 ready_when = { pattern = "Try \"how do I\\?\"" }
@@ -223,7 +237,25 @@ Unset fields take these values:
 | `pty.queued_input_supported` | `false` |
 | `capabilities.multi_session` | `false` |
 | `capabilities.ask_user.*` | all `false` |
+| `capabilities.streaming_tool_output` | `false` |
 | `cost.metered` | `false` |
+| `parse.idle` | `["^>\\s*$", "^❯\\s*$"]` |
+| `parse.tool_call_start` | none (no tool-call events from PTY parse) |
+| `parse.tool_call_end` | none |
+| `parse.plan_section` | none |
+| `parse.thought_section` | none |
+| `parse.ask_yes_no` | none |
+| `parse.ask_options` | none |
+| `parse.error_lines` | empty |
+
+### 5.4 Regex flavor
+
+All `parse.*` patterns use a **POSIX ERE-compatible subset** equivalent
+to Rust's `regex-lite` / Go's `RE2`. Specifically, backreferences and
+look-around are NOT supported. Drivers MUST reject Manifests that
+contain features outside the subset. Patterns are anchored to logical
+lines (i.e. `^` matches start-of-line, `$` matches end-of-line), with
+ANSI escapes stripped before matching.
 
 ## 6. Transport Bindings
 
@@ -257,8 +289,10 @@ Driver responsibilities:
    (escape-stripped, full-grapheme) screen text, debouncing on full-
    line boundaries.
 5. Translate matches to Core Events (§7).
-6. Forward raw screen state to subscribers that opt in (e.g. for
-   user-facing terminal mirror).
+6. Optionally emit `cap.pty.raw_bytes` (§7.12) for subscribers that
+   need the raw screen state (e.g. a user-facing terminal mirror).
+   Drivers MAY suppress this stream by default — it is a separate
+   subscription, not part of the default event flow.
 
 Cancellation:
 
@@ -351,6 +385,25 @@ Event is a DataPart with `_meta.cap.kind` set to the kind below. In
 other bindings, each Event is a JSON object with a top-level `kind`
 field.
 
+### 7.0 `_meta` object
+
+Every Core Event MAY carry a top-level `_meta` object containing
+implementation-defined annotations. The `cap` namespace under `_meta`
+is reserved for fields defined by this spec (e.g. `_meta.cap.kind`
+when transported as A2A DataPart, `_meta.cap.assigned_to` and
+`_meta.cap.depends_on` on Plan entries, `_meta.cap.message_to` for
+cross-agent directives in §10.3). Other namespaces (`_meta.<vendor>.*`)
+are reserved for implementers; receivers MUST ignore unknown
+namespaces. The `_meta` field is OPTIONAL — events without it are
+fully valid.
+
+### 7.0.1 Direction-of-flow
+
+The events in §7.1–§7.6, §7.9, §7.11 flow from Agent → Orchestrator.
+§7.7 (`cap.user_input.inject`), §7.8 (`cap.cancel`), and §7.10
+(`cap.session.config`) flow from Orchestrator → Agent. §7.10 is the
+REQUIRED first frame at session start — see §9 lifecycle.
+
 ### 7.1 `cap.text_chunk`
 
 ```jsonc
@@ -387,7 +440,10 @@ A full-state plan. Latest emission REPLACES previous.
 ```
 
 `status` ∈ `pending | in_progress | completed | cancelled | blocked`.
-`priority` ∈ `high | medium | low`.
+`priority` is OPTIONAL; when present, it MUST be one of
+`urgent | high | medium | low`. Orchestrators MUST treat an absent
+priority as "unspecified" and MUST NOT infer a default — many
+planners (Claude Code, codex, manus) do not assign priorities at all.
 
 ### 7.4 `cap.thought`
 
@@ -524,6 +580,26 @@ when starting a session.
 }
 ```
 
+### 7.12 `cap.pty.raw_bytes` (OPTIONAL, PTY binding only)
+
+Raw byte stream from the agent's PTY master — the same bytes the
+Driver feeds into its VT100 emulator. Drivers MUST NOT emit this
+event unless a subscriber has explicitly opted in (via a transport-
+specific subscription mechanism such as an `?include_raw=1` query
+parameter on the A2A binding). When emitted, each event carries one
+chunk of bytes; consumers are expected to maintain their own emulator
+state.
+
+```jsonc
+{
+  "kind": "cap.pty.raw_bytes",
+  "bytes_b64": "G1szM21oZWxsbxtbMG0="
+}
+```
+
+`bytes_b64` is the base64-encoded chunk. Order of events MUST match
+the order in which bytes arrived from the PTY master.
+
 ### 7.11 `cap.error`
 
 For non-fatal errors. Fatal errors terminate the session.
@@ -579,28 +655,31 @@ result: { ok: true }
 ## 9. Session Lifecycle
 
 ```
-                 ┌──────────────┐
-                 │  starting    │   spawn binary, wait for ready_when
-                 └──────┬───────┘
-                        │
-                        ▼
-                 ┌──────────────┐
-       ┌────────►│   working    │◄─────────┐
-       │         └──────┬───────┘          │
-       │                │ ask_user / perm  │ ask_user.answer
-       │                ▼                  │ / permission.response
-       │         ┌──────────────┐          │
-       │         │ input_required│─────────┘
-       │         └──────────────┘
-       │ Terminal:
-       ▼
-   completed | cancelled | failed
+   client (cap.session.config)
+              │
+              ▼
+       ┌──────────────┐
+       │   starting   │   driver spawns binary, waits for ready_when
+       └──────┬───────┘
+              │ cap.session.ready
+              ▼
+       ┌──────────────┐
+  ┌───►│   working    │◄─────────┐
+  │    └──────┬───────┘          │
+  │           │ ask_user / perm  │ ask_user.answer
+  │           ▼                  │ / permission.response
+  │    ┌───────────────┐         │
+  │    │ input_required│─────────┘
+  │    └───────────────┘
+  │ Terminal:
+  ▼
+  completed | cancelled | failed
 ```
 
-The Orchestrator MUST send `cap.session.config` as the first frame.
-The Driver responds with `cap.session.ready` once the Agent reaches
-`ready_when` from the Manifest. Subsequent prompts use
-`cap.user_input.inject`.
+The Orchestrator MUST send `cap.session.config` (§7.10) as the first
+frame to the Driver — before `starting`. The Driver replies with
+`cap.session.ready` once the Agent reaches `ready_when` from the
+Manifest. Subsequent prompts use `cap.user_input.inject` (§7.7).
 
 ## 10. Multi-Agent Orchestration
 
@@ -792,7 +871,17 @@ namespace (e.g. `cap.fs.read` belongs to `profile/coding`).
 
 ### 14.2 Error code registry
 
-JSON-RPC error codes occupy `-32099 ... -32000`:
+CAP defines two error vocabularies:
+
+- **JSON-RPC numeric codes** (`-32099 ... -32000`) used by the
+  ACP-stdio binding (§6.4), which is JSON-RPC native. When other
+  bindings need to surface the same conditions (e.g. a Driver
+  rejecting a frame), the corresponding **string code** (table below)
+  is what appears on the wire in `cap.error` or `DriverError`
+  payloads.
+- **String codes** used everywhere else (stream-json, gRPC, A2A,
+  in-memory SDK errors). Numeric and string codes share semantics
+  one-to-one; receivers SHOULD treat them as equivalent.
 
 | Code | Symbol | Meaning |
 |---|---|---|
