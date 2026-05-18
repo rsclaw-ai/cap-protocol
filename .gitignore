@@ -1,0 +1,55 @@
+# --- Rust ------------------------------------------------------------------
+/target
+**/target/
+**/*.rs.bk
+*.pdb
+
+# --- Node (in case website grows or tooling is added) ----------------------
+node_modules/
+.cache/
+.parcel-cache/
+.next/
+dist/
+out/
+*.tsbuildinfo
+
+# --- macOS -----------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# --- Editors / IDEs --------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.zed/
+
+# --- Env / secrets ---------------------------------------------------------
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.p12
+
+# --- Logs / runtime artifacts ----------------------------------------------
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# --- Build output / deploy staging -----------------------------------------
+website/_site/
+website/_build/
+site-build/
+
+# --- Misc ------------------------------------------------------------------
+.coverage
+coverage/
+*.tmp
+.tmp/
+.scratch/

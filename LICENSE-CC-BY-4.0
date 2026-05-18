@@ -1,0 +1,59 @@
+Creative Commons Attribution 4.0 International (CC BY 4.0)
+
+Copyright (c) 2026 rsclaw and CAP contributors
+
+This work — the CAP (CLI Agent Protocol) specification text and
+official website content — is licensed under the Creative Commons
+Attribution 4.0 International License.
+
+You are free to:
+
+  Share   — copy and redistribute the material in any medium or format
+  Adapt   — remix, transform, and build upon the material
+            for any purpose, even commercially.
+
+The licensor cannot revoke these freedoms as long as you follow the
+license terms.
+
+Under the following terms:
+
+  Attribution — You must give appropriate credit, provide a link to
+                the license, and indicate if changes were made. You may
+                do so in any reasonable manner, but not in any way that
+                suggests the licensor endorses you or your use.
+
+  No additional restrictions — You may not apply legal terms or
+                technological measures that legally restrict others
+                from doing anything the license permits.
+
+Suggested attribution format:
+
+    "CAP — CLI Agent Protocol, https://cap-protocol.org,
+     originally authored by rsclaw,
+     licensed under CC BY 4.0."
+
+Full legal code: https://creativecommons.org/licenses/by/4.0/legalcode
+
+Human-readable summary: https://creativecommons.org/licenses/by/4.0/
+
+----
+
+This CC BY 4.0 license applies to:
+
+  - All specification text in `docs/` (cap-v1.md, cap-profile-coding-v1.md,
+    and any future profile or addendum documents).
+  - All textual content of the official website in `website/`
+    (index.html prose, README.md, etc.).
+
+Source code in this repository (under `crates/`, `examples/`, and tooling)
+is licensed separately under the MIT License. See LICENSE-MIT.
+
+Note on icons and trademarks:
+
+  - The CAP wordmark and `[CAP]` bracket logo are part of the work and
+    covered by CC BY 4.0 (with attribution).
+  - References to other projects (Claude Code, Codex, Opencode, aider,
+    openclaude, Gemini CLI, MCP, A2A, ACP, Zed, etc.) refer to those
+    projects' own marks and are used for identification only. Those
+    marks belong to their respective owners and are NOT covered by
+    this license.
