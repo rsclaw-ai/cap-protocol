@@ -1,6 +1,6 @@
 [package]
 name        = "cap-rs"
-description = "Umbrella crate for the CAP (CLI Agent Protocol) Rust reference implementation."
+description = "Rust reference implementation of the CAP (CLI Agent Protocol)."
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
@@ -14,3 +14,35 @@ readme = "README.md"
 
 [lib]
 path = "src/lib.rs"
+
+# ---------------------------------------------------------------------------
+# Features
+#
+# `pty` is in `default` because it is the universal substrate of CAP —
+# every CLI agent can be driven via PTY without protocol negotiation.
+# Other bindings are opt-in fast-paths for agents that natively support
+# them.
+#
+# Heavy native dependencies (tonic/prost, git2, portable-pty C bindings
+# on Windows, reqwest TLS stacks) are scoped to their feature with
+# `optional = true`. Disabling a feature removes both code and deps.
+# ---------------------------------------------------------------------------
+
+[features]
+default      = ["pty"]
+
+# Transport bindings (deps added as bindings are implemented)
+pty          = []   # portable-pty + vt100
+stream-json  = []   # serde + tokio process
+acp          = []   # JSON-RPC framing
+a2a          = []   # reqwest + eventsource-stream
+grpc         = []   # tonic + prost
+
+# Coordination layer
+orchestrator = []   # pulls in git2 for worktree isolation
+
+# Convenience: everything
+full         = ["pty", "stream-json", "acp", "a2a", "grpc", "orchestrator"]
+
+[dependencies]
+# (none yet — placeholder release; real deps land as each feature ships)

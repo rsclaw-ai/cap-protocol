@@ -2,15 +2,24 @@
 resolver = "3"
 members = [
     "crates/cap-rs",
-    "crates/cap-rs-core",
-    "crates/cap-rs-pty",
-    "crates/cap-rs-stream-json",
-    "crates/cap-rs-acp",
-    "crates/cap-rs-a2a",
-    "crates/cap-rs-grpc",
-    "crates/cap-rs-orchestrator",
     "crates/cap-cli",
 ]
+
+# ---------------------------------------------------------------------------
+# Reserved sub-crate names (locked at v0.0.0 on crates.io, NOT in this
+# workspace and NOT actively maintained):
+#
+#   cap-rs-core            cap-rs-pty            cap-rs-stream-json
+#   cap-rs-acp             cap-rs-a2a            cap-rs-grpc
+#   cap-rs-orchestrator
+#
+# Everything currently lives inside `cap-rs` behind feature flags. These
+# names are defensive reservations. If a binding ever genuinely benefits
+# from independent semver (e.g. `cap-rs-grpc` if tonic/prost build cost
+# becomes a sticking point, or a third party offers to co-maintain a
+# binding), the name is already ours and we can split it out without
+# squatter friction.
+# ---------------------------------------------------------------------------
 
 [workspace.package]
 version      = "0.0.0"

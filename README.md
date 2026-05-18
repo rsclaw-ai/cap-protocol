@@ -68,16 +68,15 @@ cap-protocol/
 │   ├── style.css
 │   ├── favicon.svg
 │   └── README.md                       Local preview + deploy instructions
-├── crates/                             Reference Rust implementation (planned)
-│   ├── cap-rs/                         Facade — one-line dep that re-exports
-│   ├── cap-rs-core/                    Protocol types + manifest parser
-│   ├── cap-rs-pty/                     Universal PTY-based driver
-│   ├── cap-rs-stream-json/             Fast-path: Claude SDK / openclaude
-│   ├── cap-rs-acp/                     Fast-path: ACP-stdio agents (Zed-compat)
-│   ├── cap-rs-a2a/                     A2A HTTPS+SSE binding (both directions)
-│   ├── cap-rs-grpc/                    Fast-path: gRPC agents (openclaude-style)
-│   ├── cap-rs-orchestrator/            Multi-agent coordination layer
+├── crates/                             Reference Rust implementation
+│   ├── cap-rs/                         Library — all bindings behind feature flags
 │   └── cap-cli/                        `cap` CLI binary
+│                                       (sub-crate names cap-rs-core / cap-rs-pty
+│                                        / cap-rs-stream-json / cap-rs-acp /
+│                                        cap-rs-a2a / cap-rs-grpc /
+│                                        cap-rs-orchestrator are reserved on
+│                                        crates.io at v0.0.0 for possible
+│                                        future split — see crates/cap-rs/README.md)
 ├── examples/                           Reference manifests (planned)
 │   ├── claude-code.toml
 │   ├── aider.toml

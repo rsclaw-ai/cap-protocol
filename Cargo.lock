@@ -9,31 +9,3 @@ version = "0.0.0"
 [[package]]
 name = "cap-rs"
 version = "0.0.0"
-
-[[package]]
-name = "cap-rs-a2a"
-version = "0.0.0"
-
-[[package]]
-name = "cap-rs-acp"
-version = "0.0.0"
-
-[[package]]
-name = "cap-rs-core"
-version = "0.0.0"
-
-[[package]]
-name = "cap-rs-grpc"
-version = "0.0.0"
-
-[[package]]
-name = "cap-rs-orchestrator"
-version = "0.0.0"
-
-[[package]]
-name = "cap-rs-pty"
-version = "0.0.0"
-
-[[package]]
-name = "cap-rs-stream-json"
-version = "0.0.0"
