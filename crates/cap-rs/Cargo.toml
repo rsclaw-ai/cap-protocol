@@ -48,7 +48,7 @@ serde        = { version = "1", features = ["derive"] }
 serde_json   = "1"
 
 # Driver-base: pulled in by any backend feature.
-tokio        = { version = "1", features = ["process", "io-util", "rt", "rt-multi-thread", "macros", "sync"], optional = true }
+tokio        = { version = "1", features = ["process", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time"], optional = true }
 async-trait  = { version = "0.1",                        optional = true }
 thiserror    = { version = "2",                          optional = true }
 tracing      = { version = "0.1",                        optional = true }
@@ -90,4 +90,14 @@ required-features = ["pty"]
 [[example]]
 name = "codex_hello"
 path = "examples/codex_hello.rs"
+required-features = ["codex"]
+
+[[example]]
+name = "codex_chat"
+path = "examples/codex_chat.rs"
+required-features = ["codex"]
+
+[[example]]
+name = "codex_smoke"
+path = "examples/codex_smoke.rs"
 required-features = ["codex"]

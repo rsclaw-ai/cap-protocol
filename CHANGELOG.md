@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`CodexAppServerDriver`** — new driver for `codex app-server --listen stdio://`
+  JSON-RPC 2.0. This is the protocol the VSCode codex extension uses
+  (marked experimental upstream). Compared to the existing
+  `CodexExecDriver` (one-shot `codex exec --json`):
+  - One process, unbounded turns (no per-turn respawn).
+  - `Driver::send(Prompt)` issues `turn/start`; subsequent prompts
+    reuse the same thread.
+  - `Cancel { CurrentTurn }` maps to `turn/interrupt` — true mid-turn
+    cancellation.
+  - Server-initiated approval requests (`execCommandApproval`,
+    `applyPatchApproval`, `permissionsRequestApproval`) surface as
+    `AgentEvent::PermissionRequest`; `mcpServerElicitationRequest` /
+    `toolRequestUserInput` surface as `AgentEvent::AskUser` with the
+    elicitation schema. `ClientFrame::PermissionResponse` /
+    `ClientFrame::AskUserAnswer` routes back via a pending-id map.
+  - Per-turn `tokenUsage` and rolling `thread/tokenUsage/updated`
+    notifications both surface as CAP usage events.
+  - `.resume(thread_id)` on the builder issues `thread/resume`.
+  - New examples: `codex_chat` (interactive multi-turn) and
+    `codex_smoke` (spawn-only handshake check).
+  - 6 unit tests covering frame dispatch + pending-response routing.
 - `ClientFrame::SessionConfig(SessionConfig)` — wire-frame form of spec
   §7.10 `cap.session.config`. Drivers can now accept session bootstrap
   either via the builder API or as an inbound frame.

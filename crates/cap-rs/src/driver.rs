@@ -13,6 +13,9 @@ pub mod pty;
 #[cfg(feature = "codex")]
 pub mod codex;
 
+#[cfg(feature = "codex")]
+pub mod codex_app_server;
+
 // Future modules — gated on their respective features:
 // #[cfg(feature = "acp")]          pub mod acp;
 // #[cfg(feature = "a2a")]          pub mod a2a;
