@@ -654,7 +654,9 @@ fn process_frame(
     // Response to our request: has `id` AND (`result` OR `error`), no `method`.
     if frame.get("id").is_some() && frame.get("method").is_none() {
         let id = frame.get("id").and_then(Value::as_u64);
-        let result = if let Some(err) = frame.get("error") {
+        let is_error = frame.get("error").is_some();
+        let err_payload = frame.get("error").cloned();
+        let result = if let Some(err) = err_payload.as_ref() {
             JsonRpcResult {
                 inner: Err((
                     err.get("code").and_then(Value::as_i64).unwrap_or(0),
@@ -669,9 +671,31 @@ fn process_frame(
                 inner: Ok(frame.get("result").cloned().unwrap_or(Value::Null)),
             }
         };
+
         if let Some(id) = id {
-            if let Some(tx) = pending.lock().expect("pending mutex poisoned").remove(&id) {
+            let claimed = pending.lock().expect("pending mutex poisoned").remove(&id);
+            if let Some(tx) = claimed {
                 let _ = tx.send(result);
+                return Vec::new();
+            }
+        }
+
+        // No awaiter — usually a response to a fire-and-forget request
+        // (turn/start, turn/interrupt). Drop successes silently; surface
+        // errors so the orchestrator sees them.
+        if is_error {
+            if let Some(err) = err_payload {
+                let code = err
+                    .get("code")
+                    .and_then(Value::as_i64)
+                    .map(|c| format!("codex_jsonrpc_{c}"))
+                    .unwrap_or_else(|| "codex_jsonrpc_error".into());
+                let message = err
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                return vec![AgentEvent::Error { code, message }];
             }
         }
         return Vec::new();
@@ -998,14 +1022,41 @@ fn parse_notification(
         }
 
         "error" | "thread/realtime/error" => {
-            let message = params
+            // ErrorNotification.params = { error: TurnError, threadId, turnId, willRetry }.
+            // TurnError = { message: string, additionalDetails?: string, codexErrorInfo?: {...} }.
+            let err = params.get("error").unwrap_or(params);
+            let message = err
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            let details = err
+                .get("additionalDetails")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let code_info = err
+                .pointer("/codexErrorInfo/code")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let will_retry = params
+                .get("willRetry")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+
+            let full_message = match (details.is_empty(), will_retry) {
+                (true, false) => message,
+                (true, true) => format!("{message} (will retry)"),
+                (false, false) => format!("{message}\n{details}"),
+                (false, true) => format!("{message}\n{details}\n(will retry)"),
+            };
+            let code = if code_info.is_empty() {
+                "codex_error".to_string()
+            } else {
+                format!("codex_{code_info}")
+            };
             vec![AgentEvent::Error {
-                code: "codex_error".into(),
-                message,
+                code,
+                message: full_message,
             }]
         }
 
@@ -1244,6 +1295,65 @@ mod tests {
                 .and_then(Value::as_str),
             Some("abc")
         );
+    }
+
+    #[test]
+    fn parse_error_notification_extracts_nested_message() {
+        // Real shape: ErrorNotification.params = {error: TurnError, threadId, turnId, willRetry}.
+        let frame: Value = serde_json::from_str(
+            r#"{"jsonrpc":"2.0","method":"error",
+                "params":{
+                    "error":{
+                        "message":"rate limit hit",
+                        "additionalDetails":"retry in 5s",
+                        "codexErrorInfo":{"code":"rate_limit"}
+                    },
+                    "threadId":"t","turnId":"u","willRetry":true
+                }}"#,
+        )
+        .unwrap();
+        let mut ds = DeltaState::default();
+        let events = process_frame(
+            &frame,
+            &empty_thread(),
+            &empty_pending(),
+            &empty_approvals(),
+            &mut ds,
+        );
+        match &events[0] {
+            AgentEvent::Error { code, message } => {
+                assert_eq!(code, "codex_rate_limit");
+                assert!(message.contains("rate limit hit"));
+                assert!(message.contains("retry in 5s"));
+                assert!(message.contains("will retry"));
+            }
+            other => panic!("wrong: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jsonrpc_error_response_without_awaiter_surfaces_as_event() {
+        // turn/start fired-and-forgotten then errors out — we must NOT
+        // drop the error silently.
+        let frame: Value = serde_json::from_str(
+            r#"{"jsonrpc":"2.0","id":99,"error":{"code":-32602,"message":"invalid input"}}"#,
+        )
+        .unwrap();
+        let mut ds = DeltaState::default();
+        let events = process_frame(
+            &frame,
+            &empty_thread(),
+            &empty_pending(),
+            &empty_approvals(),
+            &mut ds,
+        );
+        match &events[0] {
+            AgentEvent::Error { code, message } => {
+                assert_eq!(code, "codex_jsonrpc_-32602");
+                assert_eq!(message, "invalid input");
+            }
+            other => panic!("wrong: {other:?}"),
+        }
     }
 
     #[test]
