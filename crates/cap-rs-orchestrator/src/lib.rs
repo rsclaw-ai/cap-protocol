@@ -4,6 +4,7 @@
 //! See `docs/cap-orchestrator-engine-design.md`.
 #![warn(missing_debug_implementations)]
 
+pub mod audit;
 pub mod config;
 pub mod event;
 pub mod factory;
