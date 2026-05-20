@@ -4,6 +4,8 @@
 //! See `docs/cap-orchestrator-engine-design.md`.
 #![warn(missing_debug_implementations)]
 
+pub mod config;
+
 /// Errors surfaced by the orchestrator engine.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
