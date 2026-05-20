@@ -7,6 +7,7 @@
 pub mod audit;
 pub mod config;
 pub mod event;
+pub mod executor;
 pub mod factory;
 pub mod registry;
 pub mod session;
