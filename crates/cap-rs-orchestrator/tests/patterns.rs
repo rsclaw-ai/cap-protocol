@@ -11,7 +11,7 @@ async fn run_to_completion(
     factory: StubDriverFactory,
 ) -> (Vec<String>, Vec<(String, String)>) {
     let wt = NoopWorktreeManager::new();
-    let (mut handle, mut events) = Executor::start(spec, factory, wt, "the task")
+    let (handle, mut events) = Executor::start(spec, factory, wt, "the task")
         .await
         .expect("executor start");
 
@@ -31,7 +31,7 @@ async fn run_to_completion(
             _ => {}
         }
     }
-    let audit = handle.audit_pairs().await;
+    let audit = handle.audit_pairs();
     (tags, audit)
 }
 
@@ -162,4 +162,44 @@ fleet:
     assert!(tags.iter().any(|t| t == "done:a"));
     assert!(tags.iter().any(|t| t == "done:b"));
     assert_eq!(tags.last().unwrap(), "complete");
+}
+
+#[tokio::test]
+async fn by_subtask_missing_block_fails_lead_and_terminates() {
+    let spec = FleetSpec::from_yaml(
+        r#"
+fleet:
+  base_branch: main
+  sessions:
+    lead: { driver: claude, permissions: allow }
+    a: { driver: codex, permissions: allow }
+  start: lead
+  routes:
+    - when: lead.done
+      fan_out: { to: [a], split: by_subtask }
+"#,
+    )
+    .unwrap();
+    // lead emits NO cap-subtasks block, so the split must fail.
+    let factory = StubDriverFactory::new()
+        .with("lead", StubDriver::new("lead").text("no block here").done(StopReason::EndTurn))
+        .with("a", StubDriver::new("a").text("should not run").done(StopReason::EndTurn));
+
+    let wt = NoopWorktreeManager::new();
+    let (_handle, mut events) = Executor::start(spec, factory, wt, "task").await.unwrap();
+
+    let mut saw_lead_failed = false;
+    let mut saw_complete = false;
+    let mut a_started = false;
+    while let Some(ev) = events.recv().await {
+        match ev {
+            OrchestratorEvent::SessionFailed { session, .. } if session == "lead" => saw_lead_failed = true,
+            OrchestratorEvent::SessionStarted { session } if session == "a" => a_started = true,
+            OrchestratorEvent::FleetComplete => { saw_complete = true; break; }
+            _ => {}
+        }
+    }
+    assert!(saw_lead_failed, "lead should be reported failed for the unparseable split");
+    assert!(saw_complete, "fleet must terminate, not hang");
+    assert!(!a_started, "target a must not spawn when the split fails");
 }

@@ -28,7 +28,7 @@ pub struct ExecutorHandle {
 impl ExecutorHandle {
     /// Snapshot the audit log as `(from, to)` pairs in order. Readable even
     /// after the fleet completes — the log is shared, not message-passed.
-    pub async fn audit_pairs(&mut self) -> Vec<(SessionId, SessionId)> {
+    pub fn audit_pairs(&self) -> Vec<(SessionId, SessionId)> {
         self.audit
             .lock()
             .unwrap()
@@ -103,6 +103,8 @@ impl Executor {
                 registry: SessionRegistry::new(),
                 audit,
                 done: HashSet::new(),
+                spawned: HashSet::new(),
+                failed: HashSet::new(),
                 buffers: HashMap::new(),
                 out: out_tx,
                 bus_tx,
@@ -123,6 +125,10 @@ struct Run<F: DriverFactory, W: WorktreeManager> {
     registry: SessionRegistry,
     audit: Arc<Mutex<AuditLog>>,
     done: HashSet<SessionId>,
+    /// Sessions successfully spawned (so we know what must still settle).
+    spawned: HashSet<SessionId>,
+    /// Sessions that failed (driver crash, or reported SessionFailed).
+    failed: HashSet<SessionId>,
     /// Accumulated assistant text per session, used to parse `by_subtask` blocks.
     buffers: HashMap<SessionId, String>,
     out: mpsc::Sender<OrchestratorEvent>,
@@ -156,7 +162,10 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
             )
             .await
         {
-            Ok(()) => true,
+            Ok(()) => {
+                self.spawned.insert(id.clone());
+                true
+            }
             Err(e) => {
                 let _ = self
                     .out
@@ -187,6 +196,13 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
             }
         }
 
+        // If nothing is pending (e.g. all start sessions failed to spawn), finish now.
+        if self.fleet_complete() {
+            let _ = self.out.send(OrchestratorEvent::FleetComplete).await;
+            self.registry.shutdown().await;
+            return;
+        }
+
         // Clone the token so the select! arm does NOT borrow `self`, leaving the
         // handlers free to take `&mut self`. (Required for borrowck.)
         let cancel = self.cancel.clone();
@@ -211,11 +227,21 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                     // Forward every engine event to the consumer.
                     let _ = self.out.send(ev.clone()).await;
 
-                    if let OrchestratorEvent::SessionDone { session, stop_reason } = ev {
-                        if self.on_session_done(&session, stop_reason).await {
-                            let _ = self.out.send(OrchestratorEvent::FleetComplete).await;
-                            break;
+                    match ev {
+                        OrchestratorEvent::SessionDone { session, stop_reason } => {
+                            if self.on_session_done(&session, stop_reason).await {
+                                let _ = self.out.send(OrchestratorEvent::FleetComplete).await;
+                                break;
+                            }
                         }
+                        OrchestratorEvent::SessionFailed { session, .. } => {
+                            self.failed.insert(session);
+                            if self.fleet_complete() {
+                                let _ = self.out.send(OrchestratorEvent::FleetComplete).await;
+                                break;
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -333,22 +359,15 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
         self.fleet_complete()
     }
 
-    /// The fleet is complete when every reachable session is done.
+    /// The fleet is complete once every spawned session has settled — i.e.
+    /// completed (`done`) or failed. Sessions that were never spawned (e.g. the
+    /// targets of a route that never fired because its lead failed) do not block
+    /// completion; this is how failed branches terminate without hanging while
+    /// sibling branches still finish.
     fn fleet_complete(&self) -> bool {
-        let mut reachable: HashSet<SessionId> =
-            self.spec.fleet.start.sessions().into_iter().collect();
-        for route in &self.spec.fleet.routes {
-            if let Ok(action) = route.action() {
-                match action {
-                    Action::RouteTo(to) => {
-                        reachable.insert(to);
-                    }
-                    Action::FanOut(f) => reachable.extend(f.to),
-                    Action::Collect(_) => {}
-                }
-            }
-        }
-        reachable.iter().all(|s| self.done.contains(s))
+        self.spawned
+            .iter()
+            .all(|s| self.done.contains(s) || self.failed.contains(s))
     }
 }
 

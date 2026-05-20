@@ -239,6 +239,11 @@ impl FleetSpec {
                             return bad("fan_out target", to);
                         }
                     }
+                    if matches!(f.split, Split::BySubtask) && route.trigger_sessions().len() > 1 {
+                        return Err(OrchestratorError::Config(
+                            "fan_out split: by_subtask requires a single-session trigger".into(),
+                        ));
+                    }
                 }
                 Action::Collect(_) => {}
             }
@@ -389,6 +394,24 @@ fleet:
   routes:
     - when: a.done
       fan_out: { to: [] }
+"#;
+        let spec = FleetSpec::from_yaml(yaml).unwrap();
+        assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_by_subtask_with_join_trigger() {
+        let yaml = r#"
+fleet:
+  base_branch: main
+  sessions:
+    a: { driver: claude }
+    b: { driver: claude }
+    c: { driver: claude }
+  start: [a, b]
+  routes:
+    - when: [a.done, b.done]
+      fan_out: { to: [c], split: by_subtask }
 "#;
         let spec = FleetSpec::from_yaml(yaml).unwrap();
         assert!(spec.validate().is_err());
