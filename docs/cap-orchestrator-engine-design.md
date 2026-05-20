@@ -147,6 +147,13 @@ fleet:
 
 (Worktrees default to one-per-session, branched off `base_branch`. Omit unless overriding.)
 
+**Driver transport:** `claude` uses the structured `stream-json` fast-path. `codex`
+and `opencode` are both driven through a PTY (their interactive TUIs), so codex
+gets multi-turn without depending on the blocked app-server websocket. The PTY
+path's turn-completion detection is the implementation's hardest part — see the
+plan. Only claude emits a structured terminal `Done`; pty agents need a
+parser-side completion heuristic.
+
 **Pattern ① lead/worker** = fan_out + join:
 
 ```yaml

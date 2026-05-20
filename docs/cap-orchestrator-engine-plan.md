@@ -6,7 +6,7 @@
 
 **Architecture:** A new `cap-rs-orchestrator` crate depending on `cap-rs`. Actor model — one tokio task per session owns a `Box<dyn Driver>`; everything communicates over `mpsc` channels. A deterministic `executor` state machine interprets the DSL and drives a `SessionRegistry`; an `audit` log records every cross-session route. Real-LLM-free testing via a `StubDriver` + `StubDriverFactory`.
 
-**Tech Stack:** Rust 2024, tokio (multi-thread rt, macros, sync, process, time), serde + serde_yaml, async-trait, thiserror, cap-rs (features `stream-json`, `pty`, `codex`).
+**Tech Stack:** Rust 2024, tokio (multi-thread rt, macros, sync, process, time), serde + serde_yaml, async-trait, thiserror, cap-rs (features `stream-json`, `pty`). codex and opencode are both driven via PTY; only claude uses a structured fast-path (`stream-json`).
 
 **Spec:** `docs/cap-orchestrator-engine-design.md`.
 
@@ -15,7 +15,7 @@
 - `cap_rs::core::AgentEvent` — terminal variant is `Done { stop_reason: StopReason, usage: Usage }`; also `PermissionRequest { req_id, tool, intent, scope, risk_level }`, `TextChunk`, `ToolCallStart/End`, `Error { code, message }`, etc.
 - `cap_rs::core::{Content, PermissionDecision, StopReason, RiskLevel}`.
 - `cap_rs::driver::{Driver, DriverError}` — trait methods `async send(&mut self, ClientFrame)`, `async next_event(&mut self) -> Option<AgentEvent>`, `async shutdown(&mut self)`. `Driver: Send` (NOT `Sync`).
-- Real drivers: `ClaudeCodeDriver::builder(cwd).dangerously_skip_permissions(bool).spawn().await`; `CodexExecDriver::builder(cwd).skip_git_repo_check(bool).arg(..).spawn().await`; `PtyDriver::builder(cmd).cwd(..).spawn(parser)`.
+- Real drivers used: `ClaudeCodeDriver::builder(cwd).dangerously_skip_permissions(bool).spawn().await` (claude); `PtyDriver::builder(cmd).cwd(..).spawn(parser)` (codex + opencode). `CodexExecDriver` is intentionally NOT used — codex rides the PTY path for multi-turn.
 
 ---
 
@@ -56,7 +56,7 @@ repository.workspace   = true
 license.workspace      = true
 
 [dependencies]
-cap-rs = { path = "../cap-rs", features = ["stream-json", "pty", "codex"] }
+cap-rs = { path = "../cap-rs", features = ["stream-json", "pty"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "process", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
@@ -2241,7 +2241,6 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use cap_rs::driver::stream_json::ClaudeCodeDriver;
-use cap_rs::driver::codex::CodexExecDriver;
 use cap_rs::driver::pty::PtyDriver;
 use cap_rs::driver::Driver;
 
@@ -2270,12 +2269,17 @@ impl DriverFactory for RealDriverFactory {
                     .await?;
                 Ok(Box::new(driver))
             }
+            // codex is driven through its interactive TUI over a PTY (multi-turn),
+            // NOT the one-shot `codex exec` process driver.
             DriverKind::Codex => {
-                let mut b = CodexExecDriver::builder(cwd).skip_git_repo_check(true);
+                let mut b = PtyDriver::builder("codex").cwd(cwd);
                 if bypass {
                     b = b.arg("--dangerously-bypass-approvals-and-sandbox");
                 }
-                Ok(Box::new(b.spawn().await?))
+                let driver = b
+                    .spawn(cap_rs::driver::pty::VtPlain::new())
+                    .map_err(OrchestratorError::Driver)?;
+                Ok(Box::new(driver))
             }
             DriverKind::Pty(command) => {
                 // PTY agents have no permission protocol; they run unsandboxed.
@@ -2290,12 +2294,16 @@ impl DriverFactory for RealDriverFactory {
 }
 ```
 
-> **Note for the implementer:** confirm the PTY parser constructor name against
-> `crates/cap-rs/src/driver/pty.rs` (the parser presets there include
-> `aider()`, `python_repl()`, `generic_repl()`). Use `generic_repl()` if
-> `VtPlain::new()` is not the public name — the `spawn` signature takes any
-> `impl AgentParser`. Pick the preset that yields plain-text output for the
-> chosen CLI.
+> **Note for the implementer — the PTY turn-detection is the project's hard part.**
+> Both `Codex` and `Pty(..)` drive a full interactive TUI; the parser must decide
+> when a turn is *done* from screen output (a structured `AgentEvent::Done` never
+> arrives like it does for claude). First confirm the parser constructor name
+> against `crates/cap-rs/src/driver/pty.rs` (presets there: `aider()`,
+> `python_repl()`, `generic_repl()`; `spawn` takes any `impl AgentParser`). If
+> none reliably detects codex/opencode turn completion, this becomes a focused
+> sub-effort: extend the pty parser with a completion heuristic (idle timeout or
+> prompt-return regex) before the smoke run in Step 4 is meaningful. Prove the
+> pipeline with `claude` first (structured, reliable), then tackle pty agents.
 
 - [ ] **Step 2: Add the `Orchestrator::run` façade to lib.rs**
 
