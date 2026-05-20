@@ -1,0 +1,21 @@
+[package]
+name         = "cap-rs-orchestrator"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+license.workspace      = true
+
+[dependencies]
+cap-rs = { path = "../cap-rs", features = ["stream-json", "pty"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "process", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+async-trait = "0.1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

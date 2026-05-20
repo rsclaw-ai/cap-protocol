@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/cap-rs",
     "crates/cap-cli",
+    "crates/cap-rs-orchestrator",
 ]
 
 # ---------------------------------------------------------------------------
