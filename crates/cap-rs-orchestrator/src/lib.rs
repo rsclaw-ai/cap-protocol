@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod event;
+pub mod session;
 pub mod testing;
 
 /// Errors surfaced by the orchestrator engine.
