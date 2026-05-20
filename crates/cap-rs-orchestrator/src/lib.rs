@@ -6,6 +6,8 @@
 
 pub mod config;
 pub mod event;
+pub mod factory;
+pub mod registry;
 pub mod session;
 pub mod testing;
 pub mod worktree;
