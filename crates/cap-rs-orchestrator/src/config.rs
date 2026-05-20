@@ -148,11 +148,20 @@ impl Trigger {
 
 impl Route {
     /// Session ids this route fires on (the `.done` suffix removed).
+    ///
+    /// Assumes the spec has been validated; each token must end in `.done`.
+    /// Call `validate()` first.
     pub fn trigger_sessions(&self) -> Vec<String> {
         self.when
             .raw_tokens()
             .iter()
-            .map(|t| t.strip_suffix(".done").unwrap_or(t).to_string())
+            .map(|t| {
+                debug_assert!(
+                    t.ends_with(".done"),
+                    "trigger token '{t}' missing .done suffix; validate() not run?"
+                );
+                t.strip_suffix(".done").unwrap_or(t).to_string()
+            })
             .collect()
     }
 
@@ -198,6 +207,11 @@ impl FleetSpec {
             }
         }
         for route in &self.fleet.routes {
+            if route.when.raw_tokens().is_empty() {
+                return Err(OrchestratorError::Config(
+                    "route trigger must reference at least one session".into(),
+                ));
+            }
             for token in route.when.raw_tokens() {
                 let id = token.strip_suffix(".done").ok_or_else(|| {
                     OrchestratorError::Config(format!(
@@ -215,6 +229,11 @@ impl FleetSpec {
                     }
                 }
                 Action::FanOut(f) => {
+                    if f.to.is_empty() {
+                        return Err(OrchestratorError::Config(
+                            "fan_out must have at least one target".into(),
+                        ));
+                    }
                     for to in &f.to {
                         if !known(to) {
                             return bad("fan_out target", to);
@@ -341,5 +360,37 @@ fleet:
             spec.fleet.sessions["oc"].driver,
             DriverKind::Pty("opencode".into())
         );
+    }
+
+    #[test]
+    fn rejects_empty_join_trigger() {
+        let yaml = r#"
+fleet:
+  base_branch: main
+  sessions:
+    a: { driver: claude }
+  start: a
+  routes:
+    - when: []
+      route_to: a
+"#;
+        let spec = FleetSpec::from_yaml(yaml).unwrap();
+        assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_empty_fan_out() {
+        let yaml = r#"
+fleet:
+  base_branch: main
+  sessions:
+    a: { driver: claude }
+  start: a
+  routes:
+    - when: a.done
+      fan_out: { to: [] }
+"#;
+        let spec = FleetSpec::from_yaml(yaml).unwrap();
+        assert!(spec.validate().is_err());
     }
 }
