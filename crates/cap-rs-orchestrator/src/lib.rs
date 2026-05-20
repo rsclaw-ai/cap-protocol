@@ -8,6 +8,7 @@ pub mod config;
 pub mod event;
 pub mod session;
 pub mod testing;
+pub mod worktree;
 
 /// Errors surfaced by the orchestrator engine.
 #[derive(Debug, thiserror::Error)]
