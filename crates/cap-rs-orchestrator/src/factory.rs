@@ -6,8 +6,8 @@ use std::path::Path;
 use async_trait::async_trait;
 use cap_rs::driver::Driver;
 
-use crate::config::{DriverKind, PermissionPolicy, SessionId};
 use crate::OrchestratorError;
+use crate::config::{DriverKind, PermissionPolicy, SessionId};
 
 #[async_trait]
 pub trait DriverFactory: Send + Sync {

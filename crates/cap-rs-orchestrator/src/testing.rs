@@ -7,12 +7,14 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use cap_rs::core::{AgentEvent, ClientFrame, PermissionScope, RiskLevel, StopReason, TextChannel, Usage};
+use cap_rs::core::{
+    AgentEvent, ClientFrame, PermissionScope, RiskLevel, StopReason, TextChannel, Usage,
+};
 use cap_rs::driver::{Driver, DriverError};
 
+use crate::OrchestratorError;
 use crate::config::{DriverKind, PermissionPolicy, SessionId};
 use crate::factory::DriverFactory;
-use crate::OrchestratorError;
 
 /// A scripted driver. Build it with chained helpers, then it replays the queued
 /// events on successive `next_event()` calls and returns `None` afterwards.

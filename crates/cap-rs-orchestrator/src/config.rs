@@ -62,9 +62,11 @@ impl<'de> Deserialize<'de> for DriverKind {
             "codex" => DriverKind::Codex,
             other => match other.strip_prefix("pty:") {
                 Some(cmd) if !cmd.is_empty() => DriverKind::Pty(cmd.to_string()),
-                _ => return Err(serde::de::Error::custom(format!(
-                    "unknown driver kind '{other}' (expected claude | codex | pty:<cmd>)"
-                ))),
+                _ => {
+                    return Err(serde::de::Error::custom(format!(
+                        "unknown driver kind '{other}' (expected claude | codex | pty:<cmd>)"
+                    )));
+                }
             },
         })
     }
@@ -214,9 +216,7 @@ impl FleetSpec {
             }
             for token in route.when.raw_tokens() {
                 let id = token.strip_suffix(".done").ok_or_else(|| {
-                    OrchestratorError::Config(format!(
-                        "trigger '{token}' must end in '.done'"
-                    ))
+                    OrchestratorError::Config(format!("trigger '{token}' must end in '.done'"))
                 })?;
                 if !known(id) {
                     return bad("trigger", id);

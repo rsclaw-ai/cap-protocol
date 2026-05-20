@@ -9,9 +9,14 @@ use crate::config::SessionId;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum OrchestratorEvent {
-    SessionStarted { session: SessionId },
+    SessionStarted {
+        session: SessionId,
+    },
     /// A raw agent event, tagged with its originating session.
-    Agent { session: SessionId, event: AgentEvent },
+    Agent {
+        session: SessionId,
+        event: AgentEvent,
+    },
     /// A permission request awaiting a human decision (only under `ask` policy).
     Ask {
         session: SessionId,
@@ -20,11 +25,22 @@ pub enum OrchestratorEvent {
         risk_level: RiskLevel,
     },
     /// The engine routed one session's output into another's inbox.
-    Routed { from: SessionId, to: SessionId },
-    SessionDone { session: SessionId, stop_reason: StopReason },
-    SessionFailed { session: SessionId, error: String },
+    Routed {
+        from: SessionId,
+        to: SessionId,
+    },
+    SessionDone {
+        session: SessionId,
+        stop_reason: StopReason,
+    },
+    SessionFailed {
+        session: SessionId,
+        error: String,
+    },
     /// A `collect: human` join completed; these candidate sessions await a pick.
-    AwaitSelection { candidates: Vec<SessionId> },
+    AwaitSelection {
+        candidates: Vec<SessionId>,
+    },
     FleetComplete,
 }
 

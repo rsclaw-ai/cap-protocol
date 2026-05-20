@@ -51,17 +51,33 @@ fleet:
     )
     .unwrap();
     let factory = StubDriverFactory::new()
-        .with("coder", StubDriver::new("coder").text("wrote code").done(StopReason::EndTurn))
-        .with("reviewer", StubDriver::new("reviewer").text("looks ok").done(StopReason::EndTurn));
+        .with(
+            "coder",
+            StubDriver::new("coder")
+                .text("wrote code")
+                .done(StopReason::EndTurn),
+        )
+        .with(
+            "reviewer",
+            StubDriver::new("reviewer")
+                .text("looks ok")
+                .done(StopReason::EndTurn),
+        );
 
     let (tags, audit) = run_to_completion(spec, factory).await;
 
     assert_eq!(tags.iter().filter(|t| t.starts_with("done:")).count(), 2);
-    let route_pos = tags.iter().position(|t| t == "route:coder->reviewer").unwrap();
+    let route_pos = tags
+        .iter()
+        .position(|t| t == "route:coder->reviewer")
+        .unwrap();
     let coder_done = tags.iter().position(|t| t == "done:coder").unwrap();
     let reviewer_done = tags.iter().position(|t| t == "done:reviewer").unwrap();
     assert!(coder_done < route_pos, "route must follow coder done");
-    assert!(route_pos < reviewer_done, "reviewer done must follow the route");
+    assert!(
+        route_pos < reviewer_done,
+        "reviewer done must follow the route"
+    );
     assert!(tags.last().unwrap() == "complete");
     assert_eq!(audit, vec![("coder".to_string(), "reviewer".to_string())]);
 }
@@ -87,20 +103,45 @@ fleet:
     )
     .unwrap();
     let factory = StubDriverFactory::new()
-        .with("lead", StubDriver::new("lead").text("plan").done(StopReason::EndTurn))
-        .with("a", StubDriver::new("a").text("a-work").done(StopReason::EndTurn))
-        .with("b", StubDriver::new("b").text("b-work").done(StopReason::EndTurn))
-        .with("rev", StubDriver::new("rev").text("merged").done(StopReason::EndTurn));
+        .with(
+            "lead",
+            StubDriver::new("lead")
+                .text("plan")
+                .done(StopReason::EndTurn),
+        )
+        .with(
+            "a",
+            StubDriver::new("a")
+                .text("a-work")
+                .done(StopReason::EndTurn),
+        )
+        .with(
+            "b",
+            StubDriver::new("b")
+                .text("b-work")
+                .done(StopReason::EndTurn),
+        )
+        .with(
+            "rev",
+            StubDriver::new("rev")
+                .text("merged")
+                .done(StopReason::EndTurn),
+        );
 
     let (tags, audit) = run_to_completion(spec, factory).await;
 
     let rev_start = tags.iter().position(|t| t == "start:rev").unwrap();
     let a_done = tags.iter().position(|t| t == "done:a").unwrap();
     let b_done = tags.iter().position(|t| t == "done:b").unwrap();
-    assert!(a_done < rev_start && b_done < rev_start, "join must wait for both");
+    assert!(
+        a_done < rev_start && b_done < rev_start,
+        "join must wait for both"
+    );
     assert!(audit.contains(&("lead".into(), "a".into())));
     assert!(audit.contains(&("lead".into(), "b".into())));
-    assert!(audit.contains(&("a".into(), "rev".into())) || audit.contains(&("b".into(), "rev".into())));
+    assert!(
+        audit.contains(&("a".into(), "rev".into())) || audit.contains(&("b".into(), "rev".into()))
+    );
     assert_eq!(tags.last().unwrap(), "complete");
 }
 
@@ -121,8 +162,14 @@ fleet:
     )
     .unwrap();
     let factory = StubDriverFactory::new()
-        .with("x", StubDriver::new("x").text("sol-x").done(StopReason::EndTurn))
-        .with("y", StubDriver::new("y").text("sol-y").done(StopReason::EndTurn));
+        .with(
+            "x",
+            StubDriver::new("x").text("sol-x").done(StopReason::EndTurn),
+        )
+        .with(
+            "y",
+            StubDriver::new("y").text("sol-y").done(StopReason::EndTurn),
+        );
 
     let (tags, _audit) = run_to_completion(spec, factory).await;
     assert!(tags.iter().any(|t| t == "select:x,y"), "tags: {tags:?}");
@@ -148,17 +195,35 @@ fleet:
     .unwrap();
 
     let fence = "`".repeat(3);
-    let lead_out =
-        format!("Here is the plan.\n{fence}cap-subtasks\n[\"task for A\", \"task for B\"]\n{fence}\n");
+    let lead_out = format!(
+        "Here is the plan.\n{fence}cap-subtasks\n[\"task for A\", \"task for B\"]\n{fence}\n"
+    );
     let factory = StubDriverFactory::new()
-        .with("lead", StubDriver::new("lead").text(&lead_out).done(StopReason::EndTurn))
-        .with("a", StubDriver::new("a").text("did A").done(StopReason::EndTurn))
-        .with("b", StubDriver::new("b").text("did B").done(StopReason::EndTurn));
+        .with(
+            "lead",
+            StubDriver::new("lead")
+                .text(&lead_out)
+                .done(StopReason::EndTurn),
+        )
+        .with(
+            "a",
+            StubDriver::new("a").text("did A").done(StopReason::EndTurn),
+        )
+        .with(
+            "b",
+            StubDriver::new("b").text("did B").done(StopReason::EndTurn),
+        );
 
     let (tags, audit) = run_to_completion(spec, factory).await;
 
-    assert!(audit.contains(&("lead".into(), "a".into())), "audit: {audit:?}");
-    assert!(audit.contains(&("lead".into(), "b".into())), "audit: {audit:?}");
+    assert!(
+        audit.contains(&("lead".into(), "a".into())),
+        "audit: {audit:?}"
+    );
+    assert!(
+        audit.contains(&("lead".into(), "b".into())),
+        "audit: {audit:?}"
+    );
     assert!(tags.iter().any(|t| t == "done:a"));
     assert!(tags.iter().any(|t| t == "done:b"));
     assert_eq!(tags.last().unwrap(), "complete");
@@ -182,8 +247,18 @@ fleet:
     .unwrap();
     // lead emits NO cap-subtasks block, so the split must fail.
     let factory = StubDriverFactory::new()
-        .with("lead", StubDriver::new("lead").text("no block here").done(StopReason::EndTurn))
-        .with("a", StubDriver::new("a").text("should not run").done(StopReason::EndTurn));
+        .with(
+            "lead",
+            StubDriver::new("lead")
+                .text("no block here")
+                .done(StopReason::EndTurn),
+        )
+        .with(
+            "a",
+            StubDriver::new("a")
+                .text("should not run")
+                .done(StopReason::EndTurn),
+        );
 
     let wt = NoopWorktreeManager::new();
     let (_handle, mut events) = Executor::start(spec, factory, wt, "task").await.unwrap();
@@ -193,13 +268,21 @@ fleet:
     let mut a_started = false;
     while let Some(ev) = events.recv().await {
         match ev {
-            OrchestratorEvent::SessionFailed { session, .. } if session == "lead" => saw_lead_failed = true,
+            OrchestratorEvent::SessionFailed { session, .. } if session == "lead" => {
+                saw_lead_failed = true
+            }
             OrchestratorEvent::SessionStarted { session } if session == "a" => a_started = true,
-            OrchestratorEvent::FleetComplete => { saw_complete = true; break; }
+            OrchestratorEvent::FleetComplete => {
+                saw_complete = true;
+                break;
+            }
             _ => {}
         }
     }
-    assert!(saw_lead_failed, "lead should be reported failed for the unparseable split");
+    assert!(
+        saw_lead_failed,
+        "lead should be reported failed for the unparseable split"
+    );
     assert!(saw_complete, "fleet must terminate, not hang");
     assert!(!a_started, "target a must not spawn when the split fails");
 }

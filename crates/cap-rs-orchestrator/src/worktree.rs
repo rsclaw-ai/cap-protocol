@@ -22,7 +22,9 @@ pub struct GitWorktreeManager {
 
 impl GitWorktreeManager {
     pub fn new(repo: impl AsRef<Path>) -> Self {
-        Self { repo: repo.as_ref().to_path_buf() }
+        Self {
+            repo: repo.as_ref().to_path_buf(),
+        }
     }
 
     fn dir_for(&self, session: &str) -> PathBuf {
@@ -70,7 +72,9 @@ pub struct NoopWorktreeManager {
 
 impl NoopWorktreeManager {
     pub fn new() -> Self {
-        Self { root: tempfile::tempdir().expect("create temp dir") }
+        Self {
+            root: tempfile::tempdir().expect("create temp dir"),
+        }
     }
 }
 
@@ -83,8 +87,7 @@ impl Default for NoopWorktreeManager {
 impl WorktreeManager for NoopWorktreeManager {
     fn create(&self, session: &str, _base_branch: &str) -> Result<PathBuf, OrchestratorError> {
         let dir = self.root.path().join(session);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| OrchestratorError::Worktree(e.to_string()))?;
+        std::fs::create_dir_all(&dir).map_err(|e| OrchestratorError::Worktree(e.to_string()))?;
         Ok(dir)
     }
 
@@ -129,7 +132,10 @@ mod tests {
 
         let wt = GitWorktreeManager::new(repo.path());
         let dir = wt.create("worker", "main").unwrap();
-        assert!(dir.join("f.txt").exists(), "worktree should contain repo files");
+        assert!(
+            dir.join("f.txt").exists(),
+            "worktree should contain repo files"
+        );
         wt.cleanup("worker").unwrap();
         assert!(!dir.exists(), "cleanup should remove the worktree dir");
     }

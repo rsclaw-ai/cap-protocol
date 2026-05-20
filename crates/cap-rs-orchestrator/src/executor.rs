@@ -9,13 +9,13 @@ use cap_rs::core::{AgentEvent, ClientFrame, Content, PermissionDecision, StopRea
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::OrchestratorError;
 use crate::audit::AuditLog;
 use crate::config::{Action, FleetSpec, PermissionPolicy, SessionId, Split};
 use crate::event::{OrchestratorControl, OrchestratorEvent};
 use crate::factory::DriverFactory;
 use crate::registry::SessionRegistry;
 use crate::worktree::WorktreeManager;
-use crate::OrchestratorError;
 
 /// A handle to a running fleet: query the audit log, answer asks, cancel.
 #[derive(Debug)]
@@ -42,7 +42,11 @@ impl ExecutorHandle {
     pub async fn decide(&self, session: SessionId, req_id: String, allow: bool) {
         let _ = self
             .control
-            .send(OrchestratorControl::Decision { session, req_id, allow })
+            .send(OrchestratorControl::Decision {
+                session,
+                req_id,
+                allow,
+            })
             .await;
     }
 
@@ -253,7 +257,11 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
     /// Handle a control message from the consumer (decision / cancel / select).
     async fn on_control(&mut self, ctrl: OrchestratorControl) {
         match ctrl {
-            OrchestratorControl::Decision { session, req_id, allow } => {
+            OrchestratorControl::Decision {
+                session,
+                req_id,
+                allow,
+            } => {
                 let decision = if allow {
                     PermissionDecision::AllowOnce
                 } else {
@@ -261,7 +269,10 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                 };
                 let _ = self
                     .registry
-                    .route(&session, ClientFrame::PermissionResponse { req_id, decision })
+                    .route(
+                        &session,
+                        ClientFrame::PermissionResponse { req_id, decision },
+                    )
                     .await;
             }
             OrchestratorControl::Cancel => self.cancel.cancel(),

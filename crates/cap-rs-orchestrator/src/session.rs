@@ -30,7 +30,9 @@ pub fn spawn_session(
 
     let join = tokio::spawn(async move {
         let _ = bus
-            .send(OrchestratorEvent::SessionStarted { session: id.clone() })
+            .send(OrchestratorEvent::SessionStarted {
+                session: id.clone(),
+            })
             .await;
 
         // Wait for the first (and only) frame to drive the turn.
@@ -57,7 +59,10 @@ pub fn spawn_session(
         let _ = pump_turn(&id, &mut driver, policy, &bus, &mut inbox_rx, &cancel).await;
     });
 
-    SessionHandle { inbox: inbox_tx, join }
+    SessionHandle {
+        inbox: inbox_tx,
+        join,
+    }
 }
 
 /// Result of one call to [`pump_turn`].
@@ -184,7 +189,9 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn prompt(s: &str) -> ClientFrame {
-        ClientFrame::Prompt { content: vec![Content::text(s)] }
+        ClientFrame::Prompt {
+            content: vec![Content::text(s)],
+        }
     }
 
     #[tokio::test]

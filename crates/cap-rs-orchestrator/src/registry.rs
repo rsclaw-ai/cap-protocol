@@ -6,12 +6,12 @@ use cap_rs::core::ClientFrame;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::OrchestratorError;
 use crate::config::{DriverKind, PermissionPolicy, SessionId};
 use crate::event::OrchestratorEvent;
 use crate::factory::DriverFactory;
-use crate::session::{spawn_session, SessionHandle};
+use crate::session::{SessionHandle, spawn_session};
 use crate::worktree::WorktreeManager;
-use crate::OrchestratorError;
 
 #[derive(Debug, Default)]
 pub struct SessionRegistry {
@@ -82,8 +82,10 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_then_route_a_frame_to_a_session() {
-        let factory = StubDriverFactory::new()
-            .with("w", StubDriver::new("w").text("done").done(StopReason::EndTurn));
+        let factory = StubDriverFactory::new().with(
+            "w",
+            StubDriver::new("w").text("done").done(StopReason::EndTurn),
+        );
         let wt = NoopWorktreeManager::new();
         let (bus_tx, mut bus_rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
@@ -102,9 +104,14 @@ mod tests {
         .await
         .unwrap();
 
-        reg.route("w", ClientFrame::Prompt { content: vec![Content::text("hi")] })
-            .await
-            .unwrap();
+        reg.route(
+            "w",
+            ClientFrame::Prompt {
+                content: vec![Content::text("hi")],
+            },
+        )
+        .await
+        .unwrap();
 
         let mut saw_done = false;
         while let Some(ev) = bus_rx.recv().await {
