@@ -5,6 +5,8 @@
 #![warn(missing_debug_implementations)]
 
 pub mod config;
+pub mod event;
+pub mod testing;
 
 /// Errors surfaced by the orchestrator engine.
 #[derive(Debug, thiserror::Error)]
