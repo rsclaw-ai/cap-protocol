@@ -44,7 +44,12 @@ async fn cmd_run(path: PathBuf, task: Option<String>, bypass: bool) -> anyhow::R
     let yaml = std::fs::read_to_string(&path)?;
     let mut spec = FleetSpec::from_yaml(&yaml).map_err(|e| anyhow::anyhow!("{e}"))?;
     if bypass {
+        // Force fleet-wide bypass: set the fleet default AND clear every
+        // per-session override so no `permissions:` in the file can opt out.
         spec.fleet.permissions = PermissionPolicy::Bypass;
+        for session in spec.fleet.sessions.values_mut() {
+            session.permissions = None;
+        }
     }
     spec.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
 
