@@ -9,6 +9,7 @@ pub mod config;
 pub mod event;
 pub mod executor;
 pub mod factory;
+pub mod real_factory;
 pub mod registry;
 pub mod session;
 pub mod testing;
@@ -26,4 +27,26 @@ pub enum OrchestratorError {
     Driver(#[from] cap_rs::driver::DriverError),
     #[error("unknown driver kind: {0}")]
     UnknownDriver(String),
+}
+
+use crate::config::FleetSpec;
+use crate::event::OrchestratorEvent;
+use crate::executor::{Executor, ExecutorHandle};
+use crate::real_factory::RealDriverFactory;
+use crate::worktree::GitWorktreeManager;
+
+/// Convenience façade: run a fleet against real CLI agents in `repo`.
+pub async fn run(
+    spec: FleetSpec,
+    repo: impl AsRef<std::path::Path>,
+    task: &str,
+) -> Result<
+    (
+        ExecutorHandle,
+        tokio::sync::mpsc::Receiver<OrchestratorEvent>,
+    ),
+    OrchestratorError,
+> {
+    let worktree = GitWorktreeManager::new(repo);
+    Executor::start(spec, RealDriverFactory, worktree, task).await
 }
