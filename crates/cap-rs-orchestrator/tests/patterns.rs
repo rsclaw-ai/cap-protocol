@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use cap_rs::core::StopReason;
 use cap_rs_orchestrator::config::FleetSpec;
 use cap_rs_orchestrator::event::OrchestratorEvent;
@@ -285,4 +287,43 @@ fleet:
     );
     assert!(saw_complete, "fleet must terminate, not hang");
     assert!(!a_started, "target a must not spawn when the split fails");
+}
+
+#[tokio::test]
+async fn pipeline_forwards_upstream_output() {
+    let spec = FleetSpec::from_yaml(
+        r#"
+fleet:
+  base_branch: main
+  sessions:
+    coder: { driver: claude, permissions: allow }
+    reviewer: { driver: codex, permissions: allow }
+  start: coder
+  routes:
+    - { when: coder.done, route_to: reviewer }
+"#,
+    )
+    .unwrap();
+    let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+    let factory = StubDriverFactory::new()
+        .with(
+            "coder",
+            StubDriver::new("coder")
+                .text("CODER_OUTPUT_XYZ")
+                .done(StopReason::EndTurn),
+        )
+        .with(
+            "reviewer",
+            StubDriver::new("reviewer")
+                .capture(captured.clone())
+                .done(StopReason::EndTurn),
+        );
+
+    let _ = run_to_completion(spec, factory).await;
+
+    let prompts = captured.lock().unwrap();
+    assert!(
+        prompts.iter().any(|p| p.contains("CODER_OUTPUT_XYZ")),
+        "reviewer should receive coder's output; got: {prompts:?}"
+    );
 }

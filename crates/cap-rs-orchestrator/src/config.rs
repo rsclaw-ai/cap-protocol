@@ -188,6 +188,25 @@ impl Route {
     }
 }
 
+/// Safe session id: non-empty, ASCII alphanumeric / `_` / `-`, no leading `-`.
+fn valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.starts_with('-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Safe git ref: non-empty, no `..`, no leading `-`, chars limited to
+/// alphanumeric / `_` `-` `.` `/`.
+fn valid_git_ref(r: &str) -> bool {
+    !r.is_empty()
+        && !r.starts_with('-')
+        && !r.contains("..")
+        && r.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+}
+
 impl FleetSpec {
     pub fn from_yaml(s: &str) -> Result<Self, OrchestratorError> {
         serde_yaml::from_str(s).map_err(|e| OrchestratorError::Config(e.to_string()))
@@ -196,6 +215,20 @@ impl FleetSpec {
     /// Static validation: every referenced session exists, every trigger uses
     /// the `.done` form, and every route has exactly one action.
     pub fn validate(&self) -> Result<(), OrchestratorError> {
+        if !valid_git_ref(&self.fleet.base_branch) {
+            return Err(OrchestratorError::Config(format!(
+                "invalid base_branch '{}'",
+                self.fleet.base_branch
+            )));
+        }
+        for id in self.fleet.sessions.keys() {
+            if !valid_session_id(id) {
+                return Err(OrchestratorError::Config(format!(
+                    "invalid session id '{id}' (allowed: letters, digits, '_', '-'; no leading '-')"
+                )));
+            }
+        }
+
         let known = |id: &str| self.fleet.sessions.contains_key(id);
         let bad = |what: &str, id: &str| {
             Err(OrchestratorError::Config(format!(
@@ -395,6 +428,24 @@ fleet:
     - when: a.done
       fan_out: { to: [] }
 "#;
+        let spec = FleetSpec::from_yaml(yaml).unwrap();
+        assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_path_escaping_session_id() {
+        for bad in ["../evil", "/tmp/evil", "a/b", "a.b", "-x"] {
+            let yaml = format!(
+                "fleet:\n  base_branch: main\n  sessions:\n    \"{bad}\": {{ driver: claude }}\n  start: \"{bad}\"\n"
+            );
+            let spec = FleetSpec::from_yaml(&yaml).unwrap();
+            assert!(spec.validate().is_err(), "id '{bad}' should be rejected");
+        }
+    }
+
+    #[test]
+    fn rejects_bad_base_branch() {
+        let yaml = "fleet:\n  base_branch: \"../../etc\"\n  sessions:\n    a: { driver: claude }\n  start: a\n";
         let spec = FleetSpec::from_yaml(yaml).unwrap();
         assert!(spec.validate().is_err());
     }

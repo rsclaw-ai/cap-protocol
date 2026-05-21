@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use cap_rs::core::{
@@ -26,6 +26,7 @@ pub struct StubDriver {
     /// Set when a permission request is scripted; the next `send` of a
     /// `PermissionResponse` records the decision here for assertions.
     pub last_decision: Option<cap_rs::core::PermissionDecision>,
+    captured: Option<Arc<Mutex<Vec<String>>>>,
 }
 
 impl StubDriver {
@@ -35,6 +36,7 @@ impl StubDriver {
             queue: VecDeque::new(),
             alive: true,
             last_decision: None,
+            captured: None,
         }
     }
 
@@ -66,13 +68,34 @@ impl StubDriver {
         });
         self
     }
+
+    /// Record the text of every Prompt frame this driver receives, for assertions.
+    pub fn capture(mut self, sink: Arc<Mutex<Vec<String>>>) -> Self {
+        self.captured = Some(sink);
+        self
+    }
 }
 
 #[async_trait::async_trait]
 impl Driver for StubDriver {
     async fn send(&mut self, frame: ClientFrame) -> Result<(), DriverError> {
-        if let ClientFrame::PermissionResponse { decision, .. } = frame {
-            self.last_decision = Some(decision);
+        match frame {
+            ClientFrame::PermissionResponse { decision, .. } => {
+                self.last_decision = Some(decision);
+            }
+            ClientFrame::Prompt { content } => {
+                if let Some(sink) = &self.captured {
+                    let text: String = content
+                        .iter()
+                        .filter_map(|c| match c {
+                            cap_rs::core::Content::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    sink.lock().unwrap().push(text);
+                }
+            }
+            _ => {}
         }
         Ok(())
     }

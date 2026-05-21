@@ -141,6 +141,25 @@ struct Run<F: DriverFactory, W: WorktreeManager> {
 }
 
 impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
+    /// Build the prompt for a routed/fanned-out session: the original task plus
+    /// the accumulated output of each upstream (trigger) session. Falls back to
+    /// just the task if no upstream produced text.
+    fn routed_payload(&self, triggers: &[String]) -> String {
+        let mut parts = Vec::new();
+        for t in triggers {
+            if let Some(buf) = self.buffers.get(t) {
+                if !buf.is_empty() {
+                    parts.push(format!("--- output from {t} ---\n{buf}"));
+                }
+            }
+        }
+        if parts.is_empty() {
+            self.task.clone()
+        } else {
+            format!("{}\n\n{}", self.task, parts.join("\n\n"))
+        }
+    }
+
     /// Effective permission policy for a session (per-session override or fleet default).
     fn policy_for(&self, id: &str) -> PermissionPolicy {
         self.spec.fleet.sessions[id]
@@ -304,11 +323,15 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                 continue; // join not yet complete
             }
             match route.action().expect("validated") {
-                Action::RouteTo(to) => fires.push(Fire::Route(to, task_prompt(&self.task))),
+                Action::RouteTo(to) => {
+                    let payload = self.routed_payload(&triggers);
+                    fires.push(Fire::Route(to, task_prompt(&payload)));
+                }
                 Action::FanOut(f) => match f.split {
                     Split::Broadcast => {
+                        let payload = self.routed_payload(&triggers);
                         for to in f.to {
-                            fires.push(Fire::Route(to, task_prompt(&self.task)));
+                            fires.push(Fire::Route(to, task_prompt(&payload)));
                         }
                     }
                     Split::BySubtask => {
