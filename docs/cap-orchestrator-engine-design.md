@@ -187,7 +187,9 @@ How `executor` reads it: `start` decides the first sessions to spawn; each
 `route` is one state-machine edge; a list `when` is a join (fires only when all
 listed sessions complete); `fan_out` triggers multiple spawns + dispatch;
 `collect: human` emits `OrchestratorEvent::AwaitSelection` carrying the
-candidate diffs and waits for a selection. Fully deterministic and replayable.
+candidate sessions for the human to review. **v1 does not block on or act on
+the pick** (see §8) — the fleet completes and the human merges the chosen
+session's worktree manually. Fully deterministic and replayable.
 
 `fan_out.split` semantics:
 

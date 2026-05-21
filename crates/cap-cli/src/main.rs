@@ -50,6 +50,10 @@ async fn cmd_run(path: PathBuf, task: Option<String>, bypass: bool) -> anyhow::R
         for session in spec.fleet.sessions.values_mut() {
             session.permissions = None;
         }
+        eprintln!(
+            "⚠ bypass: every agent will run unsandboxed with no permission gate \
+             (worktree isolation still applies)."
+        );
     }
     spec.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -100,7 +104,13 @@ async fn cmd_run(path: PathBuf, task: Option<String>, bypass: bool) -> anyhow::R
                 handle.decide(session, req_id, allow).await;
             }
             OrchestratorEvent::AwaitSelection { candidates } => {
-                println!("⊙ pick a winner among: {}", candidates.join(", "));
+                // v1 surfaces the candidates for manual review; it does not block
+                // on or act on a pick — inspect each session's worktree and merge
+                // the one you want yourself.
+                println!(
+                    "⊙ candidates ready for manual review (one git worktree each): {}",
+                    candidates.join(", ")
+                );
             }
             OrchestratorEvent::FleetComplete => {
                 println!("== fleet complete ==");
