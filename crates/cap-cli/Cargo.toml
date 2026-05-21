@@ -12,6 +12,12 @@ keywords.workspace     = true
 categories.workspace   = true
 readme = "README.md"
 
+[dependencies]
+cap-rs-orchestrator = { path = "../cap-rs-orchestrator" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "signal"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
 [[bin]]
 name = "cap"
 path = "src/main.rs"
