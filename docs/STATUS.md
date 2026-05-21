@@ -1,7 +1,37 @@
-# cap-protocol — status (2026-05-19)
+# cap-protocol — status (2026-05-21)
+
+Lives under `docs/` (not normative — overwrite on each work session).
+
+## Latest: `cap-rs-orchestrator` engine landed (sub-project 1 of the remote-control vision)
+
+On branch `design/orchestrator-engine`. A headless multi-agent orchestration
+engine: runs N collaborating CLI agents in one process from a declarative
+`fleet.yaml`, driven locally by `cap run <fleet.yaml>`. Design:
+`docs/cap-orchestrator-engine-design.md`; plan: `docs/cap-orchestrator-engine-plan.md`.
+
+- **Architecture:** actor model — one tokio task per session owns a `Box<dyn Driver>`
+  (Driver is Send-not-Sync; no `Mutex<Driver>`); a deterministic `executor` state
+  machine drives a `SessionRegistry` from the validated fleet spec; an audit log
+  records every cross-session route.
+- **Works (vs `StubDriver`, zero LLM/network):** pipeline, lead-worker fan-out+join,
+  parallel race, `by_subtask` split; per-session `ask`/`allow`/`deny` + fleet `bypass`;
+  interactive `ask` decision round-trip; git-worktree isolation per session.
+- **Real agents:** `claude` wired (stream-json). `codex` + `opencode` are **deferred** —
+  both ride the PTY path and need a turn-completion heuristic (a TUI emits no
+  structured `Done`); `RealDriverFactory` returns a loud "not wired yet" error for them.
+- **Test gate:** `cargo test --all-features` = cap-rs 27 + orchestrator 17 unit + 5
+  integration + 2 doctest, all green; clippy `-D warnings`, fmt, doc all clean.
+- **Follow-on debt (non-blocking, from final review):** vestigial `TurnResult` enum;
+  `by_subtask` failure emits `SessionFailed{lead}` after `SessionDone{lead}`; no
+  cycle detection in `validate()`; `testing` module is unconditionally `pub`.
+- **Next:** PTY turn-detection → wire codex/opencode; then sub-projects 2–5
+  (remote transport, tunnel, push, mobile app).
+
+---
+
+## Prior session (2026-05-19): v0.0.1 self-review + codex multi-turn
 
 Working snapshot after the v0.0.1 self-review + codex multi-turn work.
-Lives under `docs/` (not normative — overwrite on each work session).
 
 ## Session goal
 
