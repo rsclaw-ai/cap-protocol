@@ -41,6 +41,26 @@ pub struct PromptGate {
     /// clear. While `Some` and the text is still sitting in the box, the parser
     /// re-sends Enter (a PTY agent that wasn't input-ready drops the first one).
     pub pending_submit: Option<String>,
+    /// Whether the agent has enabled bracketed-paste mode (DECSET 2004). The
+    /// parser tracks it from the byte stream; `send(Prompt)` uses it to wrap a
+    /// prompt so multi-line text lands as one paste instead of each newline
+    /// being interpreted as a keypress/submit by the TUI.
+    pub bracketed_paste: bool,
+}
+
+/// Bracketed-paste framing (xterm DECSET 2004). Wrapping pasted text in these
+/// tells a TUI "this is a paste, not typing" — newlines inside are inert.
+const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+
+/// Wrap prompt text in bracketed-paste markers.
+fn bracketed_wrap(text: &str) -> Vec<u8> {
+    let mut v =
+        Vec::with_capacity(text.len() + BRACKETED_PASTE_START.len() + BRACKETED_PASTE_END.len());
+    v.extend_from_slice(BRACKETED_PASTE_START);
+    v.extend_from_slice(text.as_bytes());
+    v.extend_from_slice(BRACKETED_PASTE_END);
+    v
 }
 
 // ---------------------------------------------------------------------------
@@ -566,6 +586,25 @@ impl TuiParser {
         }
     }
 
+    /// Update the shared bracketed-paste flag from a raw byte chunk by looking
+    /// for DECSET 2004 enable/disable (`ESC [ ? 2004 h|l`). Only the last
+    /// occurrence in the chunk matters.
+    fn detect_bracketed_paste(&self, bytes: &[u8]) {
+        const ENABLE: &[u8] = b"\x1b[?2004h";
+        const DISABLE: &[u8] = b"\x1b[?2004l";
+        let last_enable = bytes.windows(ENABLE.len()).rposition(|w| w == ENABLE);
+        let last_disable = bytes.windows(DISABLE.len()).rposition(|w| w == DISABLE);
+        let new_state = match (last_enable, last_disable) {
+            (Some(e), Some(d)) => e > d,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => return,
+        };
+        if let Ok(mut g) = self.gate.lock() {
+            g.bracketed_paste = new_state;
+        }
+    }
+
     /// The bottom-most line that matches a ready marker — the live input box
     /// (as opposed to an earlier prompt echoed up into the transcript).
     fn input_box_line(&self, screen: &str) -> Option<String> {
@@ -600,6 +639,9 @@ impl AgentParser for TuiParser {
     }
 
     fn on_bytes(&mut self, bytes: &[u8]) -> Vec<AgentEvent> {
+        // Track bracketed-paste mode from the raw stream (engine-agnostic), so
+        // send(Prompt) can wrap multi-line prompts safely.
+        self.detect_bracketed_paste(bytes);
         // Feed the terminal emulator and note whether anything actually
         // changed. We do NOT stream intermediate frames — the authoritative
         // turn output is the screen captured at the next quiescence boundary.
@@ -820,10 +862,22 @@ impl Driver for PtyDriver {
                 let mut prompt_text = String::new();
                 for c in content {
                     if let Content::Text { text } = c {
-                        self.send_bytes(text.as_bytes()).await?;
                         prompt_text.push_str(&text);
                     }
                     // Image / other content not meaningful for raw PTY.
+                }
+                // If the agent enabled bracketed paste, wrap the text so a
+                // multi-line prompt (e.g. routed upstream output) lands as one
+                // paste rather than each newline submitting/triggering the TUI.
+                let bracketed = self
+                    .prompt_gate
+                    .as_ref()
+                    .map(|g| g.lock().expect("prompt gate poisoned").bracketed_paste)
+                    .unwrap_or(false);
+                if bracketed {
+                    self.send_bytes(&bracketed_wrap(&prompt_text)).await?;
+                } else {
+                    self.send_bytes(prompt_text.as_bytes()).await?;
                 }
                 // Let the text settle into the agent's input widget before the
                 // Enter. A `\r` sent back-to-back races ahead of a TUI ingesting
@@ -1341,6 +1395,32 @@ mod tests {
             p.drain_input().is_empty(),
             "no further re-sends after submit"
         );
+    }
+
+    /// The parser tracks DECSET 2004 from the byte stream into the gate, so
+    /// send(Prompt) knows whether to bracketed-paste-wrap the prompt.
+    #[test]
+    fn tui_tracks_bracketed_paste_mode() {
+        let mut p = TuiParser::codex();
+        let gate = p.prompt_gate().unwrap();
+        assert!(!gate.lock().unwrap().bracketed_paste, "off by default");
+
+        p.on_bytes(b"welcome \x1b[?2004h\xe2\x80\xba ");
+        assert!(gate.lock().unwrap().bracketed_paste, "enable detected");
+
+        p.on_bytes(b"bye \x1b[?2004l");
+        assert!(!gate.lock().unwrap().bracketed_paste, "disable detected");
+    }
+
+    /// Bracketed-paste framing wraps the text in DECSET 2004 paste markers so
+    /// the TUI treats embedded newlines as content, not submits.
+    #[test]
+    fn bracketed_wrap_frames_multiline_text() {
+        let wrapped = bracketed_wrap("line1\nline2");
+        assert!(wrapped.starts_with(b"\x1b[200~"));
+        assert!(wrapped.ends_with(b"\x1b[201~"));
+        // The newline is carried inside the paste verbatim.
+        assert!(wrapped.windows(11).any(|w| w == b"line1\nline2"));
     }
 
     /// The prompt gate is opt-in: only TuiParser exposes one.
