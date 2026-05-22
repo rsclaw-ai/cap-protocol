@@ -1,12 +1,19 @@
-//! Builds real `cap-rs` drivers. `claude` rides the structured `stream-json`
-//! fast-path; `codex` and `pty:<cmd>` agents (opencode, …) ride a PTY with the
-//! [`TuiParser`] turn-completion heuristic (idle-settle + ready-marker).
+//! Builds real `cap-rs` drivers. Each first-class agent name maps to its
+//! highest-fidelity structured path:
+//! - `claude` → `stream-json`
+//! - `codex` → `codex mcp-server` (stdio MCP)
+//! - `acp:opencode` → ACP over stdio
+//!
+//! `pty:<cmd>` remains the universal screen-scraping fallback; `pty:codex`
+//! still works (with the codex-tuned [`TuiParser::codex`]) if a caller needs
+//! the old behavior.
 
 use std::path::Path;
 
 use async_trait::async_trait;
 use cap_rs::driver::Driver;
 use cap_rs::driver::acp::AcpDriver;
+use cap_rs::driver::codex_mcp::CodexMcpDriver;
 use cap_rs::driver::pty::{PtyDriver, TuiParser};
 use cap_rs::driver::stream_json::ClaudeCodeDriver;
 
@@ -35,15 +42,24 @@ impl DriverFactory for RealDriverFactory {
                     .await?;
                 Ok(Box::new(driver))
             }
-            // codex: interactive TUI under a PTY (NOT `codex exec` — PTY gives
-            // multi-turn and dodges the app-server websocket blocker). Bypass
-            // maps to codex's native skip-all-prompts flag.
+            // codex: stdio MCP server (`codex mcp-server`). Structured streaming
+            // — codex/event notifications mid-turn, clean structuredContent on
+            // the tools/call response — no TUI chrome, no idle heuristics. Map
+            // CAP's permission policy onto codex's approval-policy + sandbox.
+            // The old PTY codex (with the tuned TuiParser) is still available
+            // as `pty:codex`.
             DriverKind::Codex => {
-                let mut builder = PtyDriver::builder("codex").cwd(cwd);
-                if bypass {
-                    builder = builder.arg("--dangerously-bypass-approvals-and-sandbox");
-                }
-                let driver = builder.spawn(TuiParser::codex())?;
+                let (approval, sandbox) = match policy {
+                    PermissionPolicy::Bypass => ("never", "danger-full-access"),
+                    PermissionPolicy::Allow => ("never", "workspace-write"),
+                    PermissionPolicy::Deny => ("never", "read-only"),
+                    PermissionPolicy::Ask => ("on-request", "workspace-write"),
+                };
+                let driver = CodexMcpDriver::builder(cwd)
+                    .approval_policy(approval)
+                    .sandbox(sandbox)
+                    .spawn()
+                    .await?;
                 Ok(Box::new(driver))
             }
             // acp:<cmd> — structured Agent Client Protocol agent (opencode,
@@ -59,17 +75,21 @@ impl DriverFactory for RealDriverFactory {
                 };
                 Ok(Box::new(driver))
             }
-            // pty:<cmd> — any other interactive CLI agent. opencode gets a
-            // tuned parser; unknown commands fall back to the generic TUI
-            // parser. opencode has no CLI bypass flag (permissions are
-            // config-driven), so `bypass` is a no-op for the PTY path here.
+            // pty:<cmd> — universal interactive-CLI fallback. Known agents
+            // get a tuned parser (codex's `›`, opencode's `❯`); unknown
+            // commands fall back to the generic TUI parser. For codex via PTY
+            // we still want bypass to pass the skip-all-prompts flag.
             DriverKind::Pty(cmd) => {
-                let parser = if cmd.as_str() == "opencode" {
-                    TuiParser::opencode()
-                } else {
-                    TuiParser::generic()
+                let mut builder = PtyDriver::builder(cmd.clone()).cwd(cwd);
+                if cmd.as_str() == "codex" && bypass {
+                    builder = builder.arg("--dangerously-bypass-approvals-and-sandbox");
+                }
+                let parser = match cmd.as_str() {
+                    "codex" => TuiParser::codex(),
+                    "opencode" => TuiParser::opencode(),
+                    _ => TuiParser::generic(),
                 };
-                let driver = PtyDriver::builder(cmd.clone()).cwd(cwd).spawn(parser)?;
+                let driver = builder.spawn(parser)?;
                 Ok(Box::new(driver))
             }
         }

@@ -28,9 +28,21 @@ engine: runs N collaborating CLI agents in one process from a declarative
     no TUI chrome, none of the PTY hacks needed. Wire format verified against real
     `opencode acp` v1.14. This is the high-fidelity opencode path; `pty:opencode` remains
     as a fallback.
-  - **codex** → still PTY (its structured `app-server` is network-blocked; `remote-control`
-    is experimental). PTY path below.
-- **Real agents (PTY floor):** `codex` + `pty:<cmd>` go through the PTY path with a
+  - **codex** → **MCP** (`codex mcp-server`, `CodexMcpDriver`): stdio JSON-RPC 2.0 with
+    codex's `codex` tool. The `tools/call` response carries `structuredContent:{threadId,
+    content}` (the clean final assistant message) AND during the turn codex emits its rich
+    streaming vocabulary as **`codex/event`** notifications — `agent_message_content_delta`
+    → `TextChunk`, `item_started`/`completed` (Reasoning, AgentMessage, command/MCP tool
+    calls) → `ToolCall*`, `token_count` → `Usage`. The reader dedups streaming vs the
+    response's `structuredContent` (one TextChunk per turn, not two). Permission gating
+    via CAP's `PermissionPolicy` → codex's `approval-policy`+`sandbox` (Bypass →
+    `never`+`danger-full-access`, Allow → `never`+`workspace-write`, etc.). **Fleet-
+    validated** (`codex → claude`): codex answered "hello" cleanly, no TUI chrome, no
+    SessionStart-hook scrollback — full structured replacement for the PTY path. Wire
+    format verified against real `codex mcp-server` v0.133; the upstream WS blocker still
+    exists but codex auto-falls-back to HTTPS. `pty:codex` (with the tuned `TuiParser`)
+    remains available as the screen-scraping fallback.
+- **PTY floor (universal fallback):** `pty:<cmd>` goes through the PTY path with a
   turn-completion heuristic — `TuiParser` (hybrid:
   **idle-settle + ready-marker + prompt-sent gate**). A TUI emits no structured `Done`,
   so the boundary is inferred: byte-silence for ~800ms AND the bottom of the rendered
@@ -60,19 +72,23 @@ engine: runs N collaborating CLI agents in one process from a declarative
   a real **`codex → claude` fleet via `cap run --bypass`** where codex actually ran the
   turn (answered `• hello`, input box cleared), fired one `Done`, routed to claude, and
   reached `== fleet complete ==`. `claude → claude` also clean.
-- **PTY follow-ups (non-blocking, codex only now that opencode rides ACP):** boundary
-  `TextChunk` is the full screen incl. TUI chrome + codex's own SessionStart-hook
-  scrollback (assistant-message extraction not done); worktree `cleanup()` still unwired
-  (re-runs need manual `git worktree remove` + branch delete).
-- **Test gate:** `cargo test --all-features` = cap-rs 43 + orchestrator 21 unit + 6
+- **PTY follow-ups (non-blocking; only relevant for `pty:<cmd>` fallback now):** boundary
+  `TextChunk` is the full screen incl. TUI chrome (assistant-message extraction not
+  done); worktree `cleanup()` still unwired (re-runs need manual `git worktree remove` +
+  branch delete).
+- **Test gate:** `cargo test --all-features` = cap-rs 53 + orchestrator 21 unit + 6
   integration + 2 doctest, all green; clippy `-D warnings`, fmt, doc all clean.
-  (cap-rs +6 = ACP frame-parsing tests grounded in real `opencode acp` frames.)
+  (cap-rs +8 = codex MCP frame-parsing tests grounded in real `codex mcp-server` v0.133
+  frames, incl. the streaming-vs-response dedup regression.)
 - **Follow-on debt (non-blocking, from final review):** vestigial `TurnResult` enum;
   `by_subtask` failure emits `SessionFailed{lead}` after `SessionDone{lead}`; no
   cycle detection in `validate()`; `testing` module is unconditionally `pub`.
-- **Next:** codex's structured path (unblock `app-server` or try `remote-control`) so it
-  leaves the PTY floor too; strip TUI chrome from codex's boundary output; wire worktree
-  cleanup. Then sub-projects 2–5 (remote transport, tunnel, push, mobile app).
+- **Next:** sub-projects 2–5 (the remote-control vision proper) — remote transport
+  (WS over Tailscale) → push-based remote permission approval → mobile app. All three
+  first-class agents are now on structured protocols, so the orchestration core is done.
+  Minor cleanup still on deck: wire worktree `cleanup()`, strip TUI chrome from the
+  `pty:<cmd>` fallback's boundary output (low priority — the three real agents don't
+  need it anymore).
 
 ---
 
