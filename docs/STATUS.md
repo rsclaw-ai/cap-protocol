@@ -16,8 +16,22 @@ engine: runs N collaborating CLI agents in one process from a declarative
 - **Works (vs `StubDriver`, zero LLM/network):** pipeline, lead-worker fan-out+join,
   parallel race, `by_subtask` split; per-session `ask`/`allow`/`deny` + fleet `bypass`;
   interactive `ask` decision round-trip; git-worktree isolation per session.
-- **Real agents:** `claude` wired (stream-json). `codex` + `pty:<cmd>` (opencode) now
-  wired through the PTY path with a turn-completion heuristic — `TuiParser` (hybrid:
+- **Agent fidelity tiers (key architecture):** prefer a native structured protocol per
+  agent; PTY screen-scraping is the universal floor, not the goal.
+  - **claude** → `stream-json` (structured, full-duplex). High fidelity.
+  - **opencode** → **ACP** (`acp:opencode`, `AcpDriver`): Agent Client Protocol over
+    JSON-RPC/stdio. Structured streaming — `agent_message_chunk`→`TextChunk`,
+    `agent_thought_chunk`→`Thought`, `tool_call(_update)`→`ToolCall*`,
+    `session/request_permission`→`PermissionRequest` (gated by the normal CAP permission
+    flow). Turn boundary = the `session/prompt` **response** (`stopReason`+`usage`), not a
+    notification. **Fleet-validated** (`acp:opencode → claude`): clean `Thought`+`hello`,
+    no TUI chrome, none of the PTY hacks needed. Wire format verified against real
+    `opencode acp` v1.14. This is the high-fidelity opencode path; `pty:opencode` remains
+    as a fallback.
+  - **codex** → still PTY (its structured `app-server` is network-blocked; `remote-control`
+    is experimental). PTY path below.
+- **Real agents (PTY floor):** `codex` + `pty:<cmd>` go through the PTY path with a
+  turn-completion heuristic — `TuiParser` (hybrid:
   **idle-settle + ready-marker + prompt-sent gate**). A TUI emits no structured `Done`,
   so the boundary is inferred: byte-silence for ~800ms AND the bottom of the rendered
   screen showing the agent's prompt glyph (codex `›`, captured live). First settle →
@@ -46,18 +60,19 @@ engine: runs N collaborating CLI agents in one process from a declarative
   a real **`codex → claude` fleet via `cap run --bypass`** where codex actually ran the
   turn (answered `• hello`, input box cleared), fired one `Done`, routed to claude, and
   reached `== fleet complete ==`. `claude → claude` also clean.
-- **PTY follow-ups (non-blocking):** boundary `TextChunk` is the full screen incl. TUI
-  chrome + codex's own SessionStart-hook scrollback (assistant-message extraction not
-  done); opencode `›`/`❯` marker is best-effort (no live capture yet); worktree
-  `cleanup()` still unwired (re-runs need manual `git worktree remove` + branch delete).
-- **Test gate:** `cargo test --all-features` = cap-rs 37 + orchestrator 21 unit + 6
+- **PTY follow-ups (non-blocking, codex only now that opencode rides ACP):** boundary
+  `TextChunk` is the full screen incl. TUI chrome + codex's own SessionStart-hook
+  scrollback (assistant-message extraction not done); worktree `cleanup()` still unwired
+  (re-runs need manual `git worktree remove` + branch delete).
+- **Test gate:** `cargo test --all-features` = cap-rs 43 + orchestrator 21 unit + 6
   integration + 2 doctest, all green; clippy `-D warnings`, fmt, doc all clean.
+  (cap-rs +6 = ACP frame-parsing tests grounded in real `opencode acp` frames.)
 - **Follow-on debt (non-blocking, from final review):** vestigial `TurnResult` enum;
   `by_subtask` failure emits `SessionFailed{lead}` after `SessionDone{lead}`; no
   cycle detection in `validate()`; `testing` module is unconditionally `pub`.
-- **Next:** strip TUI chrome from boundary output (route just the assistant message, not
-  the whole screen); opencode live capture to finalize its marker; wire worktree cleanup.
-  Then sub-projects 2–5 (remote transport, tunnel, push, mobile app).
+- **Next:** codex's structured path (unblock `app-server` or try `remote-control`) so it
+  leaves the PTY floor too; strip TUI chrome from codex's boundary output; wire worktree
+  cleanup. Then sub-projects 2–5 (remote transport, tunnel, push, mobile app).
 
 ---
 

@@ -6,6 +6,7 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use cap_rs::driver::Driver;
+use cap_rs::driver::acp::AcpDriver;
 use cap_rs::driver::pty::{PtyDriver, TuiParser};
 use cap_rs::driver::stream_json::ClaudeCodeDriver;
 
@@ -43,6 +44,19 @@ impl DriverFactory for RealDriverFactory {
                     builder = builder.arg("--dangerously-bypass-approvals-and-sandbox");
                 }
                 let driver = builder.spawn(TuiParser::codex())?;
+                Ok(Box::new(driver))
+            }
+            // acp:<cmd> — structured Agent Client Protocol agent (opencode,
+            // …). Far higher fidelity than PTY: real streaming + structured
+            // tool/permission events. Permission gating rides CAP's normal
+            // PermissionRequest flow (so `bypass`/`allow` is honored by the
+            // session actor), no agent-specific flag needed.
+            DriverKind::Acp(cmd) => {
+                let driver = if cmd.as_str() == "opencode" {
+                    AcpDriver::opencode(cwd).await?
+                } else {
+                    AcpDriver::builder(cmd.clone(), cwd).spawn().await?
+                };
                 Ok(Box::new(driver))
             }
             // pty:<cmd> — any other interactive CLI agent. opencode gets a

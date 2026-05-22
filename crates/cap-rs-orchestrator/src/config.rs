@@ -46,11 +46,13 @@ pub enum PermissionPolicy {
     Bypass,
 }
 
-/// `claude` | `codex` | `pty:<command>`.
+/// `claude` | `codex` | `acp:<command>` | `pty:<command>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriverKind {
     Claude,
     Codex,
+    /// Structured Agent Client Protocol agent (e.g. `acp:opencode`).
+    Acp(String),
     Pty(String),
 }
 
@@ -60,14 +62,17 @@ impl<'de> Deserialize<'de> for DriverKind {
         Ok(match s.as_str() {
             "claude" => DriverKind::Claude,
             "codex" => DriverKind::Codex,
-            other => match other.strip_prefix("pty:") {
-                Some(cmd) if !cmd.is_empty() => DriverKind::Pty(cmd.to_string()),
-                _ => {
+            other => {
+                if let Some(cmd) = other.strip_prefix("acp:").filter(|c| !c.is_empty()) {
+                    DriverKind::Acp(cmd.to_string())
+                } else if let Some(cmd) = other.strip_prefix("pty:").filter(|c| !c.is_empty()) {
+                    DriverKind::Pty(cmd.to_string())
+                } else {
                     return Err(serde::de::Error::custom(format!(
-                        "unknown driver kind '{other}' (expected claude | codex | pty:<cmd>)"
+                        "unknown driver kind '{other}' (expected claude | codex | acp:<cmd> | pty:<cmd>)"
                     )));
                 }
-            },
+            }
         })
     }
 }
