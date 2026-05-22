@@ -61,6 +61,16 @@ mod common {
         fn exit_status(&self) -> Option<DriverExitStatus> {
             None
         }
+
+        /// Whether the caller must wait for an [`AgentEvent::Ready`] before
+        /// sending the first [`ClientFrame::Prompt`]. Default `false`: a
+        /// structured agent (claude stream-json) accepts a prompt the moment
+        /// it spawns. PTY/TUI agents (codex, opencode) need ~seconds to boot
+        /// to their input prompt — a prompt sent earlier is typed into a
+        /// not-ready terminal and lost. Such drivers return `true`.
+        fn prompt_after_ready(&self) -> bool {
+            false
+        }
     }
 
     /// How an agent session terminated. Roughly mirrors `std::process::ExitStatus`

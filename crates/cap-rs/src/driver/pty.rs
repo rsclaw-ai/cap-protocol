@@ -14,6 +14,7 @@
 //! (Claude Code TUI, aider, codex CLI, …) layer on top.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -22,6 +23,25 @@ use tracing::{debug, trace, warn};
 
 use crate::core::{AgentEvent, ClientFrame, Content, StopReason, TextChannel, Usage};
 use crate::driver::{Driver, DriverError, DriverExitStatus};
+
+// ---------------------------------------------------------------------------
+// PromptGate
+// ---------------------------------------------------------------------------
+
+/// Shared state the driver hands a quiescence parser so it can reason about the
+/// conversation lifecycle. The driver writes it on `send(Prompt)`; the parser
+/// reads (and clears `pending_submit`) on its idle ticks.
+#[derive(Debug, Default)]
+pub struct PromptGate {
+    /// A real prompt has been sent. Before this, settles are startup noise and
+    /// must not produce `Done`.
+    pub armed: bool,
+    /// Text of the most recent prompt whose submission hasn't been confirmed.
+    /// `Some` between `send(Prompt)` and the parser observing the input box
+    /// clear. While `Some` and the text is still sitting in the box, the parser
+    /// re-sends Enter (a PTY agent that wasn't input-ready drops the first one).
+    pub pending_submit: Option<String>,
+}
 
 // ---------------------------------------------------------------------------
 // AgentParser
@@ -46,6 +66,45 @@ pub trait AgentParser: Send + 'static {
     /// Called once when PTY EOF is observed (agent exited). Return any
     /// final events (e.g. a synthesised [`AgentEvent::Done`]).
     fn on_eof(&mut self) -> Vec<AgentEvent> {
+        Vec::new()
+    }
+
+    /// How long the byte stream must stay silent before [`Self::on_idle`] is
+    /// invoked. `None` (the default) disables idle detection entirely — the
+    /// parser is purely byte-driven, exactly as before.
+    ///
+    /// TUI agents (codex, opencode) emit no structured turn-completion frame;
+    /// the only reliable signal that a turn finished is that the agent stopped
+    /// emitting bytes and is sitting at its input prompt. Returning `Some(dur)`
+    /// arms a timer so [`Self::on_idle`] fires after `dur` of quiescence.
+    fn idle_timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Called when the byte stream has been silent for [`Self::idle_timeout`].
+    /// Default: no-op. Quiescence-based parsers use this to synthesise a
+    /// turn boundary ([`AgentEvent::Ready`] / [`AgentEvent::Done`]) once the
+    /// agent settles at its prompt.
+    ///
+    /// A spinner or streamed tokens keep bytes flowing, so this is *not*
+    /// called mid-turn — only when the agent has genuinely gone quiet.
+    fn on_idle(&mut self) -> Vec<AgentEvent> {
+        Vec::new()
+    }
+
+    /// Optional shared [`PromptGate`] the driver writes on `send(Prompt)`. A
+    /// quiescence parser uses it to gate turn-completion (no `Done` before the
+    /// first real prompt) and to confirm a prompt actually submitted. `None`
+    /// (the default) means the parser does no prompt gating.
+    fn prompt_gate(&self) -> Option<std::sync::Arc<std::sync::Mutex<PromptGate>>> {
+        None
+    }
+
+    /// Bytes the parser wants written back to the agent's stdin (e.g. a re-sent
+    /// Enter when a prompt's submission was dropped). The parser thread drains
+    /// this after each `on_bytes`/`on_idle` and forwards to the PTY. Default
+    /// empty: parsers that never inject input return nothing.
+    fn drain_input(&mut self) -> Vec<Vec<u8>> {
         Vec::new()
     }
 }
@@ -386,6 +445,285 @@ impl AgentParser for ReplParser {
 }
 
 // ---------------------------------------------------------------------------
+// TuiParser — full-screen TUI agents (codex, opencode, …)
+// ---------------------------------------------------------------------------
+
+/// Parser for full-screen TUI agents that never emit a structured
+/// turn-completion frame (codex's interactive TUI, opencode, …).
+///
+/// These agents repaint the whole terminal every frame, run spinners while
+/// thinking, and keep an input box on screen at all times — so "the prompt is
+/// visible" does NOT mean "the turn is done". The only reliable boundary is a
+/// **hybrid** of two signals:
+///
+/// 1. **Idle settle** — the byte stream goes silent for [`Self::idle_timeout`].
+///    While the agent thinks/streams it emits bytes (spinner ticks, tokens),
+///    so silence only happens once it has truly stopped. This is the
+///    agent-agnostic backbone.
+/// 2. **Ready marker** — the bottom of the rendered (ANSI-stripped) screen
+///    matches a configurable prompt regex (codex's `›`, opencode's `❯`, …).
+///    This guards against a mid-turn lull that isn't actually at the prompt.
+///
+/// On the **first** settle-at-prompt the parser emits [`AgentEvent::Ready`];
+/// every subsequent one emits the final screen as an [`AgentEvent::TextChunk`]
+/// followed by [`AgentEvent::Done`]. Intermediate frames are not streamed —
+/// for orchestration the authoritative turn output is the screen at
+/// quiescence (stripping TUI chrome out of that screen is a separate, harder
+/// problem, deliberately left as a follow-up; this parser's job is the
+/// boundary).
+///
+/// The ready markers are a per-agent tuning knob, not gospel: real TUIs drift
+/// across versions and startup modals can spoof a prompt. Validate the regex
+/// against a captured session ([`Self::custom`]) when wiring a new agent.
+pub struct TuiParser {
+    name: &'static str,
+    vt: vt100::Parser,
+    /// Last rendered (ANSI-stripped) screen contents.
+    last_screen: String,
+    /// Bottom-of-screen prompt patterns that mean "ready for input".
+    ready_markers: Vec<regex_lite::Regex>,
+    /// Byte-silence that counts as the agent having settled.
+    idle: Duration,
+    /// Have we emitted the first `Ready` yet (startup vs turn boundary).
+    seen_first_ready: bool,
+    /// Has the screen changed since the last boundary we emitted? Prevents a
+    /// second idle tick (no new output) from re-firing `Done`.
+    dirty_since_boundary: bool,
+    /// Shared with the driver: `armed` (a real prompt was sent) and
+    /// `pending_submit` (a prompt whose Enter we're confirming landed).
+    gate: std::sync::Arc<std::sync::Mutex<PromptGate>>,
+    /// Bytes to write back to the agent (a re-sent Enter); drained by the
+    /// parser thread.
+    to_send: Vec<Vec<u8>>,
+    /// How many times we've re-sent Enter for the current pending prompt.
+    /// Bounded so a detection miss can't loop forever.
+    resubmit_attempts: u32,
+    /// Monotonic turn counter, tags synthesized event message ids.
+    turn: u64,
+}
+
+/// Max times to re-send Enter for one prompt before giving up and treating the
+/// next settle as a turn boundary anyway.
+const MAX_RESUBMITS: u32 = 4;
+
+impl std::fmt::Debug for TuiParser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TuiParser")
+            .field("name", &self.name)
+            .field("turn", &self.turn)
+            .field("dirty", &self.dirty_since_boundary)
+            .finish()
+    }
+}
+
+impl TuiParser {
+    /// Parser tuned for OpenAI's `codex` interactive TUI. Ready marker `›`
+    /// captured from a live session.
+    pub fn codex() -> Self {
+        Self::custom("codex", &[r"›"], Duration::from_millis(800))
+    }
+
+    /// Parser tuned for `opencode`. Markers are best-effort across the common
+    /// prompt glyphs; validate against a real capture when finalizing.
+    pub fn opencode() -> Self {
+        Self::custom(
+            "opencode",
+            &[r"❯", r"›", r">\s*$"],
+            Duration::from_millis(800),
+        )
+    }
+
+    /// Generic full-screen TUI fallback for an unknown `pty:<cmd>` agent.
+    /// Accepts the usual prompt glyphs. Turn detection is best-effort until a
+    /// real marker is captured for the specific agent.
+    pub fn generic() -> Self {
+        Self::custom(
+            "tui",
+            &[r"›", r"❯", r">\s*$", r"\$\s*$"],
+            Duration::from_millis(800),
+        )
+    }
+
+    /// Custom constructor: name, bottom-of-screen ready-prompt regexes, and the
+    /// byte-silence window that counts as "settled".
+    pub fn custom(name: &'static str, markers: &[&str], idle: Duration) -> Self {
+        let ready_markers = markers
+            .iter()
+            .map(|p| regex_lite::Regex::new(p).expect("invalid ready-marker regex"))
+            .collect();
+        Self {
+            name,
+            vt: vt100::Parser::new(50, 200, 10_000),
+            last_screen: String::new(),
+            ready_markers,
+            idle,
+            seen_first_ready: false,
+            dirty_since_boundary: false,
+            gate: std::sync::Arc::new(std::sync::Mutex::new(PromptGate::default())),
+            to_send: Vec::new(),
+            resubmit_attempts: 0,
+            turn: 0,
+        }
+    }
+
+    /// The bottom-most line that matches a ready marker — the live input box
+    /// (as opposed to an earlier prompt echoed up into the transcript).
+    fn input_box_line(&self, screen: &str) -> Option<String> {
+        screen
+            .lines()
+            .rev()
+            .find(|line| {
+                let trimmed = line.trim_end_matches(['\n', '\r']);
+                self.ready_markers.iter().any(|re| re.is_match(trimmed))
+            })
+            .map(|l| l.to_string())
+    }
+
+    /// True if any of the last few non-empty screen lines matches a ready
+    /// marker (the input prompt is showing at the bottom).
+    fn at_prompt(&self, screen: &str) -> bool {
+        screen
+            .lines()
+            .rev()
+            .filter(|l| !l.trim().is_empty())
+            .take(4)
+            .any(|line| {
+                let trimmed = line.trim_end_matches(['\n', '\r']);
+                self.ready_markers.iter().any(|re| re.is_match(trimmed))
+            })
+    }
+}
+
+impl AgentParser for TuiParser {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn on_bytes(&mut self, bytes: &[u8]) -> Vec<AgentEvent> {
+        // Feed the terminal emulator and note whether anything actually
+        // changed. We do NOT stream intermediate frames — the authoritative
+        // turn output is the screen captured at the next quiescence boundary.
+        self.vt.process(bytes);
+        let screen = self.vt.screen().contents();
+        if screen != self.last_screen {
+            self.last_screen = screen;
+            self.dirty_since_boundary = true;
+        }
+        Vec::new()
+    }
+
+    fn idle_timeout(&self) -> Option<Duration> {
+        Some(self.idle)
+    }
+
+    fn prompt_gate(&self) -> Option<std::sync::Arc<std::sync::Mutex<PromptGate>>> {
+        Some(std::sync::Arc::clone(&self.gate))
+    }
+
+    fn drain_input(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.to_send)
+    }
+
+    fn on_idle(&mut self) -> Vec<AgentEvent> {
+        // Nothing new since the last boundary → the agent is just parked at
+        // its prompt. Stay silent (don't re-fire Done every idle tick).
+        if !self.dirty_since_boundary {
+            return Vec::new();
+        }
+        // Quiet, but is it quiet *at the prompt*? If not (mid-turn lull, a
+        // tool running with no output, a modal), wait for more signal.
+        if !self.at_prompt(&self.last_screen) {
+            return Vec::new();
+        }
+
+        let (armed, pending) = {
+            let g = self.gate.lock().expect("prompt gate poisoned");
+            (g.armed, g.pending_submit.clone())
+        };
+
+        // A turn boundary only counts once a real prompt has been sent; before
+        // that, settles are startup noise (boot frames, modals) and emitting
+        // Done would route empty output downstream. Don't consume the dirty
+        // flag pre-arm — keep tracking so the first armed settle still fires.
+        if !armed {
+            self.dirty_since_boundary = false;
+            if !self.seen_first_ready {
+                self.seen_first_ready = true;
+                return vec![AgentEvent::Ready {
+                    session_id: format!("{}-pid{}", self.name, std::process::id()),
+                    model: None,
+                }];
+            }
+            return Vec::new();
+        }
+
+        // Armed. Before declaring the turn done, confirm the prompt actually
+        // submitted: a PTY agent that wasn't input-ready drops the first Enter,
+        // leaving our prompt text sitting in the input box. If it's still there,
+        // re-send Enter (bounded) and wait rather than route the un-run screen.
+        if let Some(text) = &pending {
+            let needle: String = text.trim().chars().take(40).collect();
+            let still_in_box = !needle.is_empty()
+                && self
+                    .input_box_line(&self.last_screen)
+                    .is_some_and(|line| line.contains(&needle));
+            if still_in_box && self.resubmit_attempts < MAX_RESUBMITS {
+                self.resubmit_attempts += 1;
+                self.to_send.push(b"\r".to_vec());
+                // Don't consume dirty: we want the next settle re-evaluated.
+                return Vec::new();
+            }
+            // Submitted (box cleared) or we've exhausted retries → the prompt is
+            // resolved; stop tracking it.
+            self.gate
+                .lock()
+                .expect("prompt gate poisoned")
+                .pending_submit = None;
+            self.resubmit_attempts = 0;
+            if still_in_box {
+                // Gave up re-sending; fall through to emit a boundary anyway so
+                // we don't hang the fleet, but the screen will show the unsent
+                // prompt (a loud, debuggable symptom rather than a silent hang).
+                warn!(
+                    parser = self.name,
+                    "prompt may not have submitted after retries"
+                );
+            }
+        }
+
+        self.dirty_since_boundary = false;
+        self.turn += 1;
+        vec![
+            AgentEvent::TextChunk {
+                msg_id: format!("turn_{}", self.turn),
+                text: self.last_screen.clone(),
+                channel: TextChannel::Assistant,
+            },
+            AgentEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ]
+    }
+
+    fn on_eof(&mut self) -> Vec<AgentEvent> {
+        let mut events = Vec::new();
+        if self.dirty_since_boundary && !self.last_screen.is_empty() {
+            events.push(AgentEvent::TextChunk {
+                msg_id: format!("turn_{}", self.turn),
+                text: self.last_screen.clone(),
+                channel: TextChannel::Assistant,
+            });
+        }
+        events.push(AgentEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        });
+        events
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PtyDriver
 // ---------------------------------------------------------------------------
 
@@ -409,6 +747,11 @@ pub struct PtyDriver {
 
     /// Final exit status, set once the child has reaped.
     exit_status: std::sync::Arc<std::sync::Mutex<Option<DriverExitStatus>>>,
+
+    /// Parser-supplied gate, written on each `Prompt` so a quiescence parser
+    /// knows the conversation started and can confirm the prompt submitted.
+    /// `None` when the parser does no prompt gating.
+    prompt_gate: Option<std::sync::Arc<std::sync::Mutex<PromptGate>>>,
 }
 
 impl std::fmt::Debug for PtyDriver {
@@ -474,14 +817,28 @@ impl Driver for PtyDriver {
     async fn send(&mut self, frame: ClientFrame) -> Result<(), DriverError> {
         match frame {
             ClientFrame::Prompt { content } => {
+                let mut prompt_text = String::new();
                 for c in content {
                     if let Content::Text { text } = c {
                         self.send_bytes(text.as_bytes()).await?;
+                        prompt_text.push_str(&text);
                     }
                     // Image / other content not meaningful for raw PTY.
                 }
-                // Most CLI agents commit on Enter.
+                // Let the text settle into the agent's input widget before the
+                // Enter. A `\r` sent back-to-back races ahead of a TUI ingesting
+                // the text and gets dropped, leaving the prompt stuck in the
+                // input box. Harmless latency for line-based agents.
+                tokio::time::sleep(Duration::from_millis(150)).await;
                 self.send_bytes(b"\r").await?;
+                // Tell a quiescence parser the conversation has started (settles
+                // now count as turns) and which prompt to confirm submitted —
+                // if the Enter was dropped, the parser re-sends it.
+                if let Some(gate) = &self.prompt_gate {
+                    let mut g = gate.lock().expect("prompt gate poisoned");
+                    g.armed = true;
+                    g.pending_submit = Some(prompt_text);
+                }
                 Ok(())
             }
             ClientFrame::Cancel { .. } => {
@@ -546,6 +903,12 @@ impl Driver for PtyDriver {
 
     fn exit_status(&self) -> Option<DriverExitStatus> {
         self.exit_status.lock().ok().and_then(|g| g.clone())
+    }
+
+    fn prompt_after_ready(&self) -> bool {
+        // A PTY/TUI agent must boot to its input prompt before it can accept a
+        // prompt; sending earlier loses it into a not-ready terminal.
+        true
     }
 }
 
@@ -662,10 +1025,20 @@ impl PtyDriverBuilder {
         let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let exit_status = std::sync::Arc::new(std::sync::Mutex::new(None));
 
-        spawn_reader_thread(
-            reader,
+        // Grab the parser's prompt gate (if any) before it moves into the
+        // parser thread, so the driver can flip it on the first Prompt.
+        let prompt_gate = parser.prompt_gate();
+
+        // Raw bytes flow reader-thread → parser-thread. The split exists so the
+        // parser thread can apply an idle timer (`recv_timeout`) that the
+        // blocking PTY `read()` loop in the reader thread cannot provide.
+        let (raw_tx, raw_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        spawn_reader_thread(reader, raw_tx);
+        spawn_parser_thread(
             parser,
+            raw_rx,
             event_tx.clone(),
+            input_tx.clone(),
             std::sync::Arc::clone(&exited),
         );
         spawn_writer_thread(writer, input_rx);
@@ -685,6 +1058,7 @@ impl PtyDriverBuilder {
             master: pair.master,
             exited,
             exit_status,
+            prompt_gate,
         })
     }
 }
@@ -693,11 +1067,12 @@ impl PtyDriverBuilder {
 // Background threads (PTY API is sync; we bridge to async via channels)
 // ---------------------------------------------------------------------------
 
-fn spawn_reader_thread<P: AgentParser>(
+/// Reader thread: blocking PTY reads, forwarding raw byte chunks to the parser
+/// thread. Owns no parser and no event channel — its sole job is to drain the
+/// PTY. Dropping `raw_tx` on EOF/error signals the parser thread to finalize.
+fn spawn_reader_thread(
     mut reader: Box<dyn std::io::Read + Send>,
-    mut parser: P,
-    tx: mpsc::Sender<AgentEvent>,
-    exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    raw_tx: std::sync::mpsc::Sender<Vec<u8>>,
 ) {
     std::thread::Builder::new()
         .name("cap-rs-pty-reader".into())
@@ -710,12 +1085,9 @@ fn spawn_reader_thread<P: AgentParser>(
                         break;
                     }
                     Ok(n) => {
-                        let events = parser.on_bytes(&buf[..n]);
-                        for ev in events {
-                            if tx.blocking_send(ev).is_err() {
-                                trace!("PTY reader: receiver dropped, exiting");
-                                return;
-                            }
+                        if raw_tx.send(buf[..n].to_vec()).is_err() {
+                            trace!("PTY reader: parser thread gone, exiting");
+                            return;
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -725,12 +1097,69 @@ fn spawn_reader_thread<P: AgentParser>(
                     }
                 }
             }
+            // Dropping raw_tx here ends the parser thread's recv loop.
+        })
+        .expect("failed to spawn PTY reader thread");
+}
+
+/// Parser thread: owns the [`AgentParser`] and the event channel. Consumes raw
+/// byte chunks from the reader thread. When the parser advertises an
+/// [`AgentParser::idle_timeout`], a quiescent stretch (`recv_timeout` elapses)
+/// drives [`AgentParser::on_idle`] — the timer a blocking read loop can't give.
+/// Channel disconnect (reader hit EOF) drives [`AgentParser::on_eof`].
+fn spawn_parser_thread<P: AgentParser>(
+    mut parser: P,
+    raw_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    tx: mpsc::Sender<AgentEvent>,
+    input_tx: mpsc::Sender<Vec<u8>>,
+    exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::mpsc::RecvTimeoutError;
+    std::thread::Builder::new()
+        .name("cap-rs-pty-parser".into())
+        .spawn(move || {
+            let idle = parser.idle_timeout();
+            // Forward any bytes the parser wants written back to the agent
+            // (e.g. a re-sent Enter); returns false if the writer is gone.
+            macro_rules! flush_injected {
+                () => {{
+                    let mut ok = true;
+                    for b in parser.drain_input() {
+                        if input_tx.blocking_send(b).is_err() {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    ok
+                }};
+            }
+            loop {
+                let recv = match idle {
+                    Some(d) => raw_rx.recv_timeout(d),
+                    None => raw_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                };
+                let events = match recv {
+                    Ok(bytes) => parser.on_bytes(&bytes),
+                    Err(RecvTimeoutError::Timeout) => parser.on_idle(),
+                    Err(RecvTimeoutError::Disconnected) => break,
+                };
+                for ev in events {
+                    if tx.blocking_send(ev).is_err() {
+                        trace!("PTY parser: receiver dropped, exiting");
+                        return;
+                    }
+                }
+                if !flush_injected!() {
+                    trace!("PTY parser: input writer gone, exiting");
+                    return;
+                }
+            }
             for ev in parser.on_eof() {
                 let _ = tx.blocking_send(ev);
             }
             exited.store(true, std::sync::atomic::Ordering::Relaxed);
         })
-        .expect("failed to spawn PTY reader thread");
+        .expect("failed to spawn PTY parser thread");
 }
 
 fn spawn_writer_thread(
@@ -779,4 +1208,214 @@ fn spawn_child_waiter(
             drop(event_tx);
         })
         .expect("failed to spawn PTY child waiter thread");
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// First settle-at-prompt is the agent coming up: emit `Ready`, not `Done`.
+    #[test]
+    fn tui_first_idle_at_prompt_emits_ready() {
+        let mut p = TuiParser::codex();
+        // codex ready glyph is `›` (U+203A).
+        assert!(
+            p.on_bytes("welcome to codex\n\u{203a} ".as_bytes())
+                .is_empty(),
+            "intermediate frames are not streamed"
+        );
+        let evs = p.on_idle();
+        assert_eq!(evs.len(), 1);
+        assert!(matches!(evs[0], AgentEvent::Ready { .. }), "got {evs:?}");
+    }
+
+    /// Simulate the driver sending a prompt by arming the gate. No
+    /// `pending_submit` → the parser treats the next settle as a clean turn
+    /// boundary (submission already confirmed elsewhere).
+    fn arm(p: &TuiParser) {
+        let gate = p.prompt_gate().expect("TuiParser exposes a gate");
+        let mut g = gate.lock().unwrap();
+        g.armed = true;
+        g.pending_submit = None;
+    }
+
+    /// A turn after Ready (and after a real prompt) settles to `TextChunk`
+    /// (final screen) + `Done`.
+    #[test]
+    fn tui_second_idle_at_prompt_emits_textchunk_then_done() {
+        let mut p = TuiParser::codex();
+        p.on_bytes("\u{203a} ".as_bytes());
+        assert!(matches!(p.on_idle().as_slice(), [AgentEvent::Ready { .. }]));
+
+        arm(&p); // driver sent the prompt
+        // New turn output, then the prompt returns.
+        p.on_bytes("the answer is 42\n\u{203a} ".as_bytes());
+        let evs = p.on_idle();
+        assert_eq!(evs.len(), 2, "got {evs:?}");
+        assert!(matches!(evs[0], AgentEvent::TextChunk { .. }));
+        assert!(matches!(
+            evs[1],
+            AgentEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                ..
+            }
+        ));
+    }
+
+    /// The gate's whole point: BEFORE a real prompt is sent, settles after the
+    /// initial Ready are startup noise (boot frames, modals) and must NOT emit
+    /// Done — otherwise the orchestrator routes empty output downstream. After
+    /// the prompt (armed), the next settle is a real turn.
+    #[test]
+    fn tui_settles_before_prompt_emit_no_done() {
+        let mut p = TuiParser::codex();
+        // Boot: first settle → Ready.
+        p.on_bytes("codex booting\n\u{203a} ".as_bytes());
+        assert!(matches!(p.on_idle().as_slice(), [AgentEvent::Ready { .. }]));
+
+        // More startup churn (MCP load, a modal) that settles at a prompt.
+        p.on_bytes("Update available  1. Update  2. Skip\n\u{203a} ".as_bytes());
+        assert!(
+            p.on_idle().is_empty(),
+            "settles before the first prompt must not fire Done"
+        );
+
+        // Driver sends the task prompt; now settles are real turns.
+        arm(&p);
+        p.on_bytes("done working\n\u{203a} ".as_bytes());
+        let evs = p.on_idle();
+        assert!(
+            matches!(
+                evs.as_slice(),
+                [AgentEvent::TextChunk { .. }, AgentEvent::Done { .. }]
+            ),
+            "armed settle must fire a turn boundary; got {evs:?}"
+        );
+    }
+
+    /// Submit verification: if the prompt is dropped (still sitting in the
+    /// input box at the settle), the parser re-sends Enter instead of emitting
+    /// Done, then fires the turn boundary once the box clears.
+    #[test]
+    fn tui_resends_enter_when_prompt_stuck_then_done_on_submit() {
+        let mut p = TuiParser::codex();
+        p.on_bytes("booting\n\u{203a} ".as_bytes());
+        assert!(matches!(p.on_idle().as_slice(), [AgentEvent::Ready { .. }]));
+
+        // Driver sent a prompt: arm + record the text to confirm submitted.
+        {
+            let gate = p.prompt_gate().unwrap();
+            let mut g = gate.lock().unwrap();
+            g.armed = true;
+            g.pending_submit = Some("do the thing".into());
+        }
+
+        // codex echoed the prompt but dropped the Enter — text sits in the box.
+        p.on_bytes("\u{203a} do the thing".as_bytes());
+        let evs = p.on_idle();
+        assert!(
+            evs.is_empty(),
+            "stuck prompt must not fire Done; got {evs:?}"
+        );
+        assert_eq!(
+            p.drain_input(),
+            vec![b"\r".to_vec()],
+            "should re-send Enter"
+        );
+
+        // Enter took: screen repaints, box no longer holds the prompt text.
+        p.on_bytes("\u{1b}[2J\u{1b}[H• done working\n\u{203a} ".as_bytes());
+        let evs = p.on_idle();
+        assert!(
+            matches!(
+                evs.as_slice(),
+                [AgentEvent::TextChunk { .. }, AgentEvent::Done { .. }]
+            ),
+            "once submitted, the next settle is the turn boundary; got {evs:?}"
+        );
+        assert!(
+            p.drain_input().is_empty(),
+            "no further re-sends after submit"
+        );
+    }
+
+    /// The prompt gate is opt-in: only TuiParser exposes one.
+    #[test]
+    fn only_tui_parser_exposes_prompt_gate() {
+        assert!(RawParser.prompt_gate().is_none());
+        assert!(VtPlainParser::new(50, 200).prompt_gate().is_none());
+        assert!(ReplParser::generic_repl().prompt_gate().is_none());
+        assert!(TuiParser::codex().prompt_gate().is_some());
+    }
+
+    /// Idling at the prompt with no NEW output must stay silent — otherwise
+    /// every idle tick would re-fire Done while the agent waits for input.
+    #[test]
+    fn tui_idle_without_new_output_is_silent() {
+        let mut p = TuiParser::codex();
+        p.on_bytes("\u{203a} ".as_bytes());
+        assert!(matches!(p.on_idle().as_slice(), [AgentEvent::Ready { .. }]));
+        assert!(
+            p.on_idle().is_empty(),
+            "second idle with no new bytes must not re-fire"
+        );
+    }
+
+    /// Quiet but NOT at the prompt (mid-turn lull, tool running) → wait.
+    #[test]
+    fn tui_idle_without_marker_is_silent() {
+        let mut p = TuiParser::codex();
+        p.on_bytes(b"thinking hard, no prompt on screen yet\n");
+        assert!(
+            p.on_idle().is_empty(),
+            "no ready marker means the turn is not done"
+        );
+    }
+
+    /// EOF always closes the turn with a `Done`.
+    #[test]
+    fn tui_eof_emits_done() {
+        let mut p = TuiParser::codex();
+        p.on_bytes(b"partial output, agent died\n");
+        let evs = p.on_eof();
+        assert!(
+            matches!(evs.last(), Some(AgentEvent::Done { .. })),
+            "got {evs:?}"
+        );
+    }
+
+    /// Idle detection is opt-in: only TuiParser arms the timer. The byte-driven
+    /// parsers must report no idle timeout so their behavior is unchanged.
+    #[test]
+    fn only_tui_parser_arms_idle_timer() {
+        assert!(RawParser.idle_timeout().is_none());
+        assert!(VtPlainParser::new(50, 200).idle_timeout().is_none());
+        assert!(ReplParser::generic_repl().idle_timeout().is_none());
+        assert!(TuiParser::codex().idle_timeout().is_some());
+    }
+
+    /// End-to-end through the real PTY thread plumbing: a process that prints a
+    /// prompt then goes quiet must surface a `Ready` via the idle timer.
+    #[tokio::test]
+    async fn pty_tui_emits_ready_on_real_idle() {
+        let parser = TuiParser::custom("test", &["\u{203a}"], Duration::from_millis(150));
+        let mut driver = PtyDriver::builder("sh")
+            .arg("-c")
+            // Print a prompt, then sit idle so the idle timer fires.
+            .arg("printf 'welcome\\n\u{203a} '; sleep 3")
+            .spawn(parser)
+            .expect("spawn PTY");
+
+        let ev = tokio::time::timeout(Duration::from_secs(2), driver.next_event())
+            .await
+            .expect("timed out waiting for Ready")
+            .expect("event stream closed unexpectedly");
+        assert!(matches!(ev, AgentEvent::Ready { .. }), "got {ev:?}");
+
+        let _ = driver.shutdown().await;
+    }
 }
