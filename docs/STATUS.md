@@ -16,16 +16,48 @@ engine: runs N collaborating CLI agents in one process from a declarative
 - **Works (vs `StubDriver`, zero LLM/network):** pipeline, lead-worker fan-out+join,
   parallel race, `by_subtask` split; per-session `ask`/`allow`/`deny` + fleet `bypass`;
   interactive `ask` decision round-trip; git-worktree isolation per session.
-- **Real agents:** `claude` wired (stream-json). `codex` + `opencode` are **deferred** —
-  both ride the PTY path and need a turn-completion heuristic (a TUI emits no
-  structured `Done`); `RealDriverFactory` returns a loud "not wired yet" error for them.
-- **Test gate:** `cargo test --all-features` = cap-rs 27 + orchestrator 17 unit + 5
+- **Real agents:** `claude` wired (stream-json). `codex` + `pty:<cmd>` (opencode) now
+  wired through the PTY path with a turn-completion heuristic — `TuiParser` (hybrid:
+  **idle-settle + ready-marker + prompt-sent gate**). A TUI emits no structured `Done`,
+  so the boundary is inferred: byte-silence for ~800ms AND the bottom of the rendered
+  screen showing the agent's prompt glyph (codex `›`, captured live). First settle →
+  `Ready`; settles AFTER a real prompt → final-screen `TextChunk` + `Done`. Three
+  cross-cutting fixes make codex reliable under orchestration:
+  1. **prompt-sent gate** (`AgentParser::prompt_gate` → shared `PromptGate`): no `Done`
+     before the first real prompt, so boot frames / update+permission modals don't route
+     empty output downstream.
+  2. **submit verification**: `send(Prompt)` records the prompt text; if at the next
+     settle that text is still sitting in the input box (a not-yet-ready TUI dropped the
+     Enter), the parser re-sends `\r` (bounded, `MAX_RESUBMITS`) and waits instead of
+     declaring the turn done. Parser→PTY write path via `AgentParser::drain_input`.
+  3. **wait-for-ready** (`Driver::prompt_after_ready`, opt-in; `PtyDriver` → true): the
+     session actor holds the first prompt until the agent emits `Ready`, so it isn't typed
+     into a still-booting terminal. claude/stub opt out (prompted immediately).
+
+  `send(Prompt)` also waits 150ms between text and Enter (a back-to-back `\r` races ahead
+  of TUI ingestion). Mechanism: `crates/cap-rs/src/driver/pty.rs` (`AgentParser` gains
+  `idle_timeout`/`on_idle`/`prompt_gate`/`drain_input`; reader thread split from a timed
+  parser thread); session wait-for-ready in `orchestrator/src/session.rs`.
+- **PTY validation (done, incl. fleet):** unit tests cover the state machine — gate
+  (settles before prompt emit no `Done`), submit-verification (re-send Enter when stuck,
+  then `Done` on submit), wait-for-ready (waits for `Ready`, fails loud if it never comes);
+  a real-PTY integration test covers the idle-timer plumbing. **Live-validated against real
+  codex**: single-agent smoke (`examples/codex_tui_smoke.rs`) gives `1 Ready, 1 Done`; and
+  a real **`codex → claude` fleet via `cap run --bypass`** where codex actually ran the
+  turn (answered `• hello`, input box cleared), fired one `Done`, routed to claude, and
+  reached `== fleet complete ==`. `claude → claude` also clean.
+- **PTY follow-ups (non-blocking):** boundary `TextChunk` is the full screen incl. TUI
+  chrome + codex's own SessionStart-hook scrollback (assistant-message extraction not
+  done); opencode `›`/`❯` marker is best-effort (no live capture yet); worktree
+  `cleanup()` still unwired (re-runs need manual `git worktree remove` + branch delete).
+- **Test gate:** `cargo test --all-features` = cap-rs 37 + orchestrator 21 unit + 6
   integration + 2 doctest, all green; clippy `-D warnings`, fmt, doc all clean.
 - **Follow-on debt (non-blocking, from final review):** vestigial `TurnResult` enum;
   `by_subtask` failure emits `SessionFailed{lead}` after `SessionDone{lead}`; no
   cycle detection in `validate()`; `testing` module is unconditionally `pub`.
-- **Next:** PTY turn-detection → wire codex/opencode; then sub-projects 2–5
-  (remote transport, tunnel, push, mobile app).
+- **Next:** strip TUI chrome from boundary output (route just the assistant message, not
+  the whole screen); opencode live capture to finalize its marker; wire worktree cleanup.
+  Then sub-projects 2–5 (remote transport, tunnel, push, mobile app).
 
 ---
 
