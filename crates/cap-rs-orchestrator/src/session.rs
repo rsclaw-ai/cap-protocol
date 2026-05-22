@@ -45,6 +45,41 @@ pub fn spawn_session(
             }
         };
 
+        // PTY/TUI agents need to boot to their input prompt before they can
+        // receive a prompt — sending earlier loses it into a not-ready
+        // terminal. Such drivers ask us to wait for the agent's `Ready`. We
+        // forward any boot events to the bus meanwhile. Structured drivers
+        // (claude) opt out and are prompted immediately.
+        if driver.prompt_after_ready() {
+            loop {
+                let ev = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => { let _ = driver.shutdown().await; return; }
+                    ev = driver.next_event() => ev,
+                };
+                match ev {
+                    Some(AgentEvent::Ready { .. }) => break,
+                    Some(event) => {
+                        let _ = bus
+                            .send(OrchestratorEvent::Agent {
+                                session: id.clone(),
+                                event,
+                            })
+                            .await;
+                    }
+                    None => {
+                        let _ = bus
+                            .send(OrchestratorEvent::SessionFailed {
+                                session: id.clone(),
+                                error: "driver exited before becoming ready".into(),
+                            })
+                            .await;
+                        return;
+                    }
+                }
+            }
+        }
+
         if let Err(e) = driver.send(frame).await {
             let _ = bus
                 .send(OrchestratorEvent::SessionFailed {
@@ -217,6 +252,66 @@ mod tests {
             }
         }
         assert_eq!(kinds, vec!["started", "agent", "done"]);
+        handle.join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn await_ready_driver_waits_for_ready_then_prompts() {
+        // A PTY-like driver: boot noise, then Ready, then the turn. The prompt
+        // must be held until Ready and then delivered exactly once.
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let driver = Box::new(
+            StubDriver::new("a")
+                .await_ready()
+                .text("booting")
+                .ready()
+                .text("answer")
+                .done(StopReason::EndTurn)
+                .capture(sink.clone()),
+        );
+        let (bus_tx, mut bus_rx) = mpsc::channel(64);
+        let token = CancellationToken::new();
+        let handle = spawn_session("a".into(), driver, PermissionPolicy::Allow, bus_tx, token);
+        handle.inbox.send(prompt("go")).await.unwrap();
+
+        let mut done = false;
+        while let Some(ev) = bus_rx.recv().await {
+            if let OrchestratorEvent::SessionDone { .. } = ev {
+                done = true;
+                break;
+            }
+        }
+        assert!(done, "session should complete after Ready");
+        assert_eq!(
+            *sink.lock().unwrap(),
+            vec!["go".to_string()],
+            "prompt delivered once, only after Ready"
+        );
+        handle.join.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn await_ready_driver_fails_if_never_ready() {
+        // No Ready is ever scripted; the driver exits while we wait → fail loud
+        // rather than send a prompt into a not-ready agent or hang forever.
+        let driver = Box::new(StubDriver::new("a").await_ready().text("noise"));
+        let (bus_tx, mut bus_rx) = mpsc::channel(64);
+        let token = CancellationToken::new();
+        let handle = spawn_session("a".into(), driver, PermissionPolicy::Allow, bus_tx, token);
+        handle.inbox.send(prompt("go")).await.unwrap();
+
+        let mut failed = false;
+        while let Some(ev) = bus_rx.recv().await {
+            if let OrchestratorEvent::SessionFailed { error, .. } = ev {
+                assert!(error.contains("before becoming ready"), "got {error}");
+                failed = true;
+                break;
+            }
+        }
+        assert!(
+            failed,
+            "must surface SessionFailed when Ready never arrives"
+        );
         handle.join.await.unwrap();
     }
 

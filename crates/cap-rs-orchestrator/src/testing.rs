@@ -27,6 +27,9 @@ pub struct StubDriver {
     /// `PermissionResponse` records the decision here for assertions.
     pub last_decision: Option<cap_rs::core::PermissionDecision>,
     captured: Option<Arc<Mutex<Vec<String>>>>,
+    /// Mirrors `Driver::prompt_after_ready` — makes the actor wait for a
+    /// scripted `Ready` before sending the prompt.
+    await_ready: bool,
 }
 
 impl StubDriver {
@@ -37,7 +40,23 @@ impl StubDriver {
             alive: true,
             last_decision: None,
             captured: None,
+            await_ready: false,
         }
+    }
+
+    /// Script a `Ready` event (e.g. a PTY agent finishing boot).
+    pub fn ready(mut self) -> Self {
+        self.queue.push_back(AgentEvent::Ready {
+            session_id: format!("{}-sess", self.name),
+            model: None,
+        });
+        self
+    }
+
+    /// Behave like a PTY driver: require a `Ready` before the prompt is sent.
+    pub fn await_ready(mut self) -> Self {
+        self.await_ready = true;
+        self
     }
 
     pub fn text(mut self, t: &str) -> Self {
@@ -115,6 +134,10 @@ impl Driver for StubDriver {
 
     fn is_alive(&self) -> bool {
         self.alive
+    }
+
+    fn prompt_after_ready(&self) -> bool {
+        self.await_ready
     }
 }
 

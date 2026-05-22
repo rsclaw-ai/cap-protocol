@@ -1,10 +1,12 @@
-//! Builds real `cap-rs` drivers. v1 wires `claude` only; `codex`/`opencode`
-//! (PTY) are deferred until the PTY turn-completion detection lands.
+//! Builds real `cap-rs` drivers. `claude` rides the structured `stream-json`
+//! fast-path; `codex` and `pty:<cmd>` agents (opencode, …) ride a PTY with the
+//! [`TuiParser`] turn-completion heuristic (idle-settle + ready-marker).
 
 use std::path::Path;
 
 use async_trait::async_trait;
 use cap_rs::driver::Driver;
+use cap_rs::driver::pty::{PtyDriver, TuiParser};
 use cap_rs::driver::stream_json::ClaudeCodeDriver;
 
 use crate::OrchestratorError;
@@ -32,14 +34,29 @@ impl DriverFactory for RealDriverFactory {
                     .await?;
                 Ok(Box::new(driver))
             }
-            // Deferred: codex + opencode ride the PTY path, which needs a
-            // turn-completion heuristic not yet built. Fail loudly rather than
-            // half-work.
-            DriverKind::Codex | DriverKind::Pty(_) => {
-                Err(OrchestratorError::UnknownDriver(format!(
-                    "{kind:?} is not wired yet — this build supports `claude` only \
-                 (codex/opencode via PTY are a follow-up: pty turn detection)"
-                )))
+            // codex: interactive TUI under a PTY (NOT `codex exec` — PTY gives
+            // multi-turn and dodges the app-server websocket blocker). Bypass
+            // maps to codex's native skip-all-prompts flag.
+            DriverKind::Codex => {
+                let mut builder = PtyDriver::builder("codex").cwd(cwd);
+                if bypass {
+                    builder = builder.arg("--dangerously-bypass-approvals-and-sandbox");
+                }
+                let driver = builder.spawn(TuiParser::codex())?;
+                Ok(Box::new(driver))
+            }
+            // pty:<cmd> — any other interactive CLI agent. opencode gets a
+            // tuned parser; unknown commands fall back to the generic TUI
+            // parser. opencode has no CLI bypass flag (permissions are
+            // config-driven), so `bypass` is a no-op for the PTY path here.
+            DriverKind::Pty(cmd) => {
+                let parser = if cmd.as_str() == "opencode" {
+                    TuiParser::opencode()
+                } else {
+                    TuiParser::generic()
+                };
+                let driver = PtyDriver::builder(cmd.clone()).cwd(cwd).spawn(parser)?;
+                Ok(Box::new(driver))
             }
         }
     }
