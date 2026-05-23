@@ -6,7 +6,7 @@ use cap_rs::core::{AgentEvent, RiskLevel, StopReason};
 use crate::config::SessionId;
 
 /// Everything the engine emits outward, tagged by session where applicable.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum OrchestratorEvent {
     SessionStarted {
@@ -45,7 +45,7 @@ pub enum OrchestratorEvent {
 }
 
 /// Everything the consumer sends back in (decisions, selections, cancel).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum OrchestratorControl {
     /// Answer to an [`OrchestratorEvent::Ask`].

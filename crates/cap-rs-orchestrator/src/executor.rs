@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use cap_rs::core::{AgentEvent, ClientFrame, Content, PermissionDecision, StopReason, TextChannel};
+use tracing::debug;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -31,7 +32,7 @@ impl ExecutorHandle {
     pub fn audit_pairs(&self) -> Vec<(SessionId, SessionId)> {
         self.audit
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .records()
             .iter()
             .map(|r| (r.from.clone(), r.to.clone()))
@@ -161,23 +162,39 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
     }
 
     /// Effective permission policy for a session (per-session override or fleet default).
-    fn policy_for(&self, id: &str) -> PermissionPolicy {
-        self.spec.fleet.sessions[id]
-            .permissions
-            .unwrap_or(self.spec.fleet.permissions)
+    fn policy_for(&self, id: &str) -> Result<PermissionPolicy, OrchestratorError> {
+        let s = self.spec.fleet.sessions.get(id).ok_or_else(|| {
+            OrchestratorError::Config(format!("session '{id}' not found in fleet spec"))
+        })?;
+        Ok(s.permissions.unwrap_or(self.spec.fleet.permissions))
     }
 
     async fn spawn(&mut self, id: &SessionId) -> bool {
-        let kind = self.spec.fleet.sessions[id].driver.clone();
-        let policy = self.policy_for(id);
-        let base = self.spec.fleet.base_branch.clone();
+        let kind = match self.spec.fleet.sessions.get(id) {
+            Some(s) => s.driver.clone(),
+            None => return false,
+        };
+        let policy = match self.policy_for(id) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = self
+                    .out
+                    .send(OrchestratorEvent::SessionFailed {
+                        session: id.clone(),
+                        error: e.to_string(),
+                    })
+                    .await;
+                return false;
+            }
+        };
+        let base = &self.spec.fleet.base_branch;
         match self
             .registry
             .spawn(
                 id.clone(),
                 &kind,
                 policy,
-                &base,
+                base,
                 &self.factory,
                 &self.worktree,
                 &self.bus_tx,
@@ -301,7 +318,8 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
     }
 
     /// React to a session finishing. Returns `true` when the fleet is complete.
-    async fn on_session_done(&mut self, session: &SessionId, _stop: StopReason) -> bool {
+    async fn on_session_done(&mut self, session: &SessionId, stop: StopReason) -> bool {
+        debug!(%session, ?stop, "session done");
         self.done.insert(session.clone());
 
         // A join fires only once — when its last member completes — because
@@ -362,7 +380,10 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                     if !self.registry.is_live(&to) && !self.spawn(&to).await {
                         continue;
                     }
-                    self.audit.lock().unwrap().record_route(&from, &to);
+                    self.audit
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record_route(&from, &to);
                     let _ = self
                         .out
                         .send(OrchestratorEvent::Routed {

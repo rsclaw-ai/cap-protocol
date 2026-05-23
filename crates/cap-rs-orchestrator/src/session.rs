@@ -26,14 +26,17 @@ pub fn spawn_session(
     bus: mpsc::Sender<OrchestratorEvent>,
     cancel: CancellationToken,
 ) -> SessionHandle {
-    let (inbox_tx, mut inbox_rx) = mpsc::channel::<ClientFrame>(32);
+    let (inbox_tx, mut inbox_rx) = mpsc::channel::<ClientFrame>(256);
 
     let join = tokio::spawn(async move {
-        let _ = bus
-            .send(OrchestratorEvent::SessionStarted {
+        bus_send(
+            &bus,
+            OrchestratorEvent::SessionStarted {
                 session: id.clone(),
-            })
-            .await;
+            },
+            &cancel,
+        )
+        .await;
 
         // Wait for the first (and only) frame to drive the turn.
         let frame = tokio::select! {
@@ -60,20 +63,26 @@ pub fn spawn_session(
                 match ev {
                     Some(AgentEvent::Ready { .. }) => break,
                     Some(event) => {
-                        let _ = bus
-                            .send(OrchestratorEvent::Agent {
+                        bus_send(
+                            &bus,
+                            OrchestratorEvent::Agent {
                                 session: id.clone(),
                                 event,
-                            })
-                            .await;
+                            },
+                            &cancel,
+                        )
+                        .await;
                     }
                     None => {
-                        let _ = bus
-                            .send(OrchestratorEvent::SessionFailed {
+                        bus_send(
+                            &bus,
+                            OrchestratorEvent::SessionFailed {
                                 session: id.clone(),
                                 error: "driver exited before becoming ready".into(),
-                            })
-                            .await;
+                            },
+                            &cancel,
+                        )
+                        .await;
                         return;
                     }
                 }
@@ -81,12 +90,15 @@ pub fn spawn_session(
         }
 
         if let Err(e) = driver.send(frame).await {
-            let _ = bus
-                .send(OrchestratorEvent::SessionFailed {
+            bus_send(
+                &bus,
+                OrchestratorEvent::SessionFailed {
                     session: id.clone(),
                     error: e.to_string(),
-                })
-                .await;
+                },
+                &cancel,
+            )
+            .await;
             return;
         }
 
@@ -108,6 +120,19 @@ enum TurnResult {
     Stop,
 }
 
+/// Send to bus with cancel awareness — never blocks if cancelled.
+async fn bus_send(
+    bus: &mpsc::Sender<OrchestratorEvent>,
+    event: OrchestratorEvent,
+    cancel: &CancellationToken,
+) {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {},
+        _ = bus.send(event) => {},
+    }
+}
+
 /// Pump events until `Done`. Returns a [`TurnResult`] telling the outer loop
 /// what to do next.
 async fn pump_turn(
@@ -126,23 +151,29 @@ async fn pump_turn(
         };
 
         let Some(ev) = ev else {
-            let _ = bus
-                .send(OrchestratorEvent::SessionFailed {
+            bus_send(
+                bus,
+                OrchestratorEvent::SessionFailed {
                     session: id.clone(),
                     error: "driver exited before completing the turn".into(),
-                })
-                .await;
+                },
+                cancel,
+            )
+            .await;
             return TurnResult::Stop;
         };
 
         match ev {
             AgentEvent::Done { stop_reason, .. } => {
-                let _ = bus
-                    .send(OrchestratorEvent::SessionDone {
+                bus_send(
+                    bus,
+                    OrchestratorEvent::SessionDone {
                         session: id.clone(),
                         stop_reason,
-                    })
-                    .await;
+                    },
+                    cancel,
+                )
+                .await;
                 // A `Done` event is terminal for this session: the driver has
                 // finished its work. Exit the actor so callers awaiting `join`
                 // are not blocked. Multi-turn use-cases open a fresh session.
@@ -156,12 +187,15 @@ async fn pump_turn(
             } => {
                 let req_id = req_id.clone();
                 let tool = tool.clone();
-                let _ = bus
-                    .send(OrchestratorEvent::Agent {
+                bus_send(
+                    bus,
+                    OrchestratorEvent::Agent {
                         session: id.clone(),
                         event: ev.clone(),
-                    })
-                    .await;
+                    },
+                    cancel,
+                )
+                .await;
 
                 let decision = match policy {
                     PermissionPolicy::Allow | PermissionPolicy::Bypass => {
@@ -169,14 +203,19 @@ async fn pump_turn(
                     }
                     PermissionPolicy::Deny => PermissionDecision::Deny,
                     PermissionPolicy::Ask => {
-                        let _ = bus
-                            .send(OrchestratorEvent::Ask {
+                        bus_send(
+                            bus,
+                            OrchestratorEvent::Ask {
                                 session: id.clone(),
                                 req_id: req_id.clone(),
                                 tool,
                                 risk_level,
-                            })
-                            .await;
+                            },
+                            cancel,
+                        )
+                        .await;
+                        // Q7: Already cancel-safe — the nested select! below
+                        // also checks cancellation before blocking on inbox_rx.
                         tokio::select! {
                             biased;
                             _ = cancel.cancelled() => { let _ = driver.shutdown().await; return TurnResult::Stop; }
@@ -192,22 +231,28 @@ async fn pump_turn(
                     .send(ClientFrame::PermissionResponse { req_id, decision })
                     .await
                 {
-                    let _ = bus
-                        .send(OrchestratorEvent::SessionFailed {
+                    bus_send(
+                        bus,
+                        OrchestratorEvent::SessionFailed {
                             session: id.clone(),
                             error: e.to_string(),
-                        })
-                        .await;
+                        },
+                        cancel,
+                    )
+                    .await;
                     return TurnResult::Stop;
                 }
             }
             other => {
-                let _ = bus
-                    .send(OrchestratorEvent::Agent {
+                bus_send(
+                    bus,
+                    OrchestratorEvent::Agent {
                         session: id.clone(),
                         event: other,
-                    })
-                    .await;
+                    },
+                    cancel,
+                )
+                .await;
             }
         }
     }

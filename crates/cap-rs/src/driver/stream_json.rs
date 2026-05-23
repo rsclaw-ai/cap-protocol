@@ -409,8 +409,15 @@ async fn reader_task(
 
 async fn stderr_drain(stderr: tokio::process::ChildStderr) {
     let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        debug!(target: "cap_rs::stream_json::stderr", "{}", line);
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => debug!(target: "cap_rs::stream_json::stderr", "{}", line),
+            Ok(None) => return,
+            Err(e) => {
+                warn!(error = %e, "stderr read error");
+                return;
+            }
+        }
     }
 }
 

@@ -23,8 +23,7 @@ pub struct StubDriver {
     name: String,
     queue: VecDeque<AgentEvent>,
     alive: bool,
-    /// Set when a permission request is scripted; the next `send` of a
-    /// `PermissionResponse` records the decision here for assertions.
+    #[allow(dead_code)]
     pub last_decision: Option<cap_rs::core::PermissionDecision>,
     captured: Option<Arc<Mutex<Vec<String>>>>,
     /// Mirrors `Driver::prompt_after_ready` — makes the actor wait for a

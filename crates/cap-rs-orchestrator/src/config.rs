@@ -63,9 +63,19 @@ impl<'de> Deserialize<'de> for DriverKind {
             "claude" => DriverKind::Claude,
             "codex" => DriverKind::Codex,
             other => {
-                if let Some(cmd) = other.strip_prefix("acp:").filter(|c| !c.is_empty()) {
+                if let Some(cmd) = other.strip_prefix("acp:") {
+                    if cmd.is_empty() || !valid_binary_name(cmd) {
+                        return Err(serde::de::Error::custom(format!(
+                            "invalid acp command '{cmd}' — expected a binary name"
+                        )));
+                    }
                     DriverKind::Acp(cmd.to_string())
-                } else if let Some(cmd) = other.strip_prefix("pty:").filter(|c| !c.is_empty()) {
+                } else if let Some(cmd) = other.strip_prefix("pty:") {
+                    if cmd.is_empty() || !valid_binary_name(cmd) {
+                        return Err(serde::de::Error::custom(format!(
+                            "invalid pty command '{cmd}' — expected a binary name"
+                        )));
+                    }
                     DriverKind::Pty(cmd.to_string())
                 } else {
                     return Err(serde::de::Error::custom(format!(
@@ -187,19 +197,33 @@ impl Route {
             Ok(Action::RouteTo(to.clone()))
         } else if let Some(f) = &self.fan_out {
             Ok(Action::FanOut(f.clone()))
+        } else if let Some(c) = self.collect {
+            Ok(Action::Collect(c))
         } else {
-            Ok(Action::Collect(self.collect.unwrap()))
+            Err(OrchestratorError::Config(
+                "route must have exactly one of route_to/fan_out/collect".into(),
+            ))
         }
     }
 }
 
 /// Safe session id: non-empty, ASCII alphanumeric / `_` / `-`, no leading `-`.
-fn valid_session_id(id: &str) -> bool {
+pub fn valid_session_id(id: &str) -> bool {
     !id.is_empty()
         && !id.starts_with('-')
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Safe binary name: non-empty, alphanumeric / `_` / `-` / `.` (e.g. `codex`, `opencode`, `my-agent`).
+/// Rejects paths, args, shell metacharacters.
+fn valid_binary_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains(' ')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
 /// Safe git ref: non-empty, no `..`, no leading `-`, chars limited to

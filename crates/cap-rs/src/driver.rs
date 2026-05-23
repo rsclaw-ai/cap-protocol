@@ -31,7 +31,7 @@ pub mod acp;
 // They're gated on `any(stream-json, pty, ...)` because their deps
 // (async-trait, thiserror) come in via those features.
 
-#[cfg(any(feature = "stream-json", feature = "pty", feature = "codex"))]
+#[cfg(any(feature = "stream-json", feature = "pty", feature = "codex", feature = "acp"))]
 mod common {
     use crate::core::{AgentEvent, ClientFrame};
 
@@ -123,5 +123,5 @@ mod common {
     }
 }
 
-#[cfg(any(feature = "stream-json", feature = "pty", feature = "codex"))]
+#[cfg(any(feature = "stream-json", feature = "pty", feature = "codex", feature = "acp"))]
 pub use common::{Driver, DriverError, DriverExitStatus};

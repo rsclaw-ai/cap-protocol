@@ -328,8 +328,15 @@ async fn reader_task(
 
 async fn stderr_drain(stderr: tokio::process::ChildStderr) {
     let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        debug!(target: "cap_rs::codex::stderr", "{}", line);
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => debug!(target: "cap_rs::codex::stderr", "{}", line),
+            Ok(None) => return,
+            Err(e) => {
+                warn!(error = %e, "stderr read error");
+                return;
+            }
+        }
     }
 }
 
@@ -478,7 +485,7 @@ async fn parse_codex_frame(
                             .unwrap_or_default()
                             .to_string();
                         let status = item.get("status").and_then(Value::as_str).unwrap_or("");
-                        let is_error = !matches!(status, "completed" | "in_progress" | "");
+                        let is_error = matches!(status, "failed" | "error" | "cancelled");
                         vec![AgentEvent::ToolCallEnd {
                             call_id: item_id,
                             output,

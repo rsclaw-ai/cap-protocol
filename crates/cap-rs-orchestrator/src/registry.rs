@@ -41,7 +41,13 @@ impl SessionRegistry {
         cancel: &CancellationToken,
     ) -> Result<(), OrchestratorError> {
         let cwd = worktree.create(&id, base_branch)?;
-        let driver = factory.build(&id, kind, &cwd, policy).await?;
+        let driver = match factory.build(&id, kind, &cwd, policy).await {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = worktree.cleanup(&id);
+                return Err(e);
+            }
+        };
         let handle = spawn_session(id.clone(), driver, policy, bus.clone(), cancel.clone());
         self.sessions.insert(id, handle);
         Ok(())
@@ -62,10 +68,7 @@ impl SessionRegistry {
     /// Drop all inboxes and await every task to finish.
     pub async fn shutdown(&mut self) {
         let handles: Vec<_> = self.sessions.drain().map(|(_, h)| h).collect();
-        for h in handles {
-            drop(h.inbox);
-            let _ = h.join.await;
-        }
+        drop(handles);
     }
 }
 

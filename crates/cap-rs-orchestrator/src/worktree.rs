@@ -49,6 +49,11 @@ impl GitWorktreeManager {
 
 impl WorktreeManager for GitWorktreeManager {
     fn create(&self, session: &str, base_branch: &str) -> Result<PathBuf, OrchestratorError> {
+        if !crate::config::valid_session_id(session) {
+            return Err(OrchestratorError::Config(format!(
+                "invalid session name '{session}' — rejected by worktree manager"
+            )));
+        }
         let dir = self.dir_for(session);
         let dir_str = dir.to_string_lossy().to_string();
         let branch = format!("cap/{session}");

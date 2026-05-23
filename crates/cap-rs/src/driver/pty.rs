@@ -389,6 +389,9 @@ impl AgentParser for ReplParser {
 
         // Compose: emit only complete lines (terminated by \n). Carry
         // over any trailing partial line by NOT moving emit_cursor past it.
+        if self.emit_cursor > self.buffer.len() {
+            self.emit_cursor = self.buffer.len();
+        }
         let region = &self.buffer[self.emit_cursor..];
         let mut consumed = 0usize;
         for line in region.split_inclusive('\n') {
@@ -600,9 +603,10 @@ impl TuiParser {
             (None, Some(_)) => false,
             (None, None) => return,
         };
-        if let Ok(mut g) = self.gate.lock() {
-            g.bracketed_paste = new_state;
-        }
+        self.gate
+            .lock()
+            .expect("gate mutex poisoned")
+            .bracketed_paste = new_state;
     }
 
     /// The bottom-most line that matches a ready marker — the live input box

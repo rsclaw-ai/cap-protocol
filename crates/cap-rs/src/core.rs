@@ -156,7 +156,7 @@ impl Content {
 // ---------------------------------------------------------------------------
 
 /// A streaming event from the agent. Subset of spec §7.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(tag = "kind")]
 pub enum AgentEvent {
@@ -279,7 +279,7 @@ pub enum TextChannel {
 }
 
 /// Plan entry from spec §7.3.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanEntry {
     pub id: String,
     pub content: String,
@@ -309,7 +309,7 @@ pub enum PlanPriority {
     Low,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(tag = "ask_kind")]
 pub enum AskKind {
@@ -329,7 +329,7 @@ pub enum AskKind {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AskOption {
     pub id: String,
     pub label: String,
@@ -480,7 +480,8 @@ mod arc_b64 {
 }
 
 /// Token / cost accounting for a completed turn — spec §7.9 `cap.usage`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Usage {
     #[serde(default)]
     pub input_tokens: u64,

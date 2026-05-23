@@ -445,6 +445,9 @@ impl CodexAppServerBuilder {
             if let Some(b) = &self.base_instructions {
                 params.insert("baseInstructions".into(), json!(b));
             }
+            if let Some(m) = &self.model {
+                params.insert("model".into(), json!(m));
+            }
             let req = json!({
                 "jsonrpc": JSONRPC_VERSION,
                 "id": req_id,
@@ -498,13 +501,17 @@ async fn send_and_await(
         .expect("pending mutex poisoned")
         .insert(id, otx);
 
-    driver
+    if driver
         .writer_tx
         .as_ref()
         .ok_or(DriverError::AgentExited)?
         .send(req.to_string())
         .await
-        .map_err(|_| DriverError::AgentExited)?;
+        .is_err()
+    {
+        pending.lock().expect("pending mutex poisoned").remove(&id);
+        return Err(DriverError::AgentExited);
+    }
 
     match tokio::time::timeout(HANDSHAKE_TIMEOUT, orx).await {
         Ok(Ok(JsonRpcResult { inner: Ok(v) })) => Ok(v),
@@ -626,8 +633,15 @@ async fn reader_task(
 
 async fn stderr_drain(stderr: tokio::process::ChildStderr) {
     let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        debug!(target: "cap_rs::codex_app_server::stderr", "{}", line);
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => debug!(target: "cap_rs::codex_app_server::stderr", "{}", line),
+            Ok(None) => return,
+            Err(e) => {
+                warn!(error = %e, "stderr read error");
+                return;
+            }
+        }
     }
 }
 

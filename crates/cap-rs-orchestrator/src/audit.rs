@@ -3,6 +3,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tracing::warn;
+
 use crate::config::SessionId;
 
 /// One routing event.
@@ -30,7 +32,10 @@ impl AuditLog {
         let at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis())
-            .unwrap_or(0);
+            .unwrap_or_else(|_| {
+                warn!("system clock is before Unix epoch; using timestamp 0");
+                0
+            });
         self.records.push(AuditRecord {
             seq: self.records.len() as u64,
             at,

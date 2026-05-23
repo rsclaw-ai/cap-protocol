@@ -33,7 +33,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 default      = ["pty"]
 
 pty          = ["dep:portable-pty", "dep:vt100", "dep:regex-lite", "dep:tokio", "dep:async-trait", "dep:thiserror", "dep:tracing"]
-stream-json  = ["dep:tokio", "dep:tokio-util", "dep:async-trait", "dep:thiserror", "dep:tracing", "dep:futures"]
+stream-json  = ["dep:tokio", "dep:tokio-util", "dep:async-trait", "dep:thiserror", "dep:tracing"]
 codex        = ["dep:tokio", "dep:async-trait", "dep:thiserror", "dep:tracing"]
 acp          = ["dep:tokio", "dep:async-trait", "dep:thiserror", "dep:tracing"]
 a2a          = []
@@ -55,7 +55,6 @@ tracing      = { version = "0.1",                        optional = true }
 
 # stream-json specific.
 tokio-util   = { version = "0.7", features = ["codec"],  optional = true }
-futures      = { version = "0.3",                        optional = true }
 
 # pty specific.
 portable-pty = { version = "0.9",                        optional = true }

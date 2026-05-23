@@ -67,6 +67,7 @@ pub struct CodexMcpDriver {
 
     thread_id: Arc<Mutex<Option<String>>>,
     next_id: Arc<AtomicU64>,
+    last_tool_call_id: Arc<AtomicU64>,
 
     /// Codex sandbox + approval policy (set at construction; applied on each
     /// tools/call). Kept here so the driver can issue the call later.
@@ -133,6 +134,7 @@ impl Driver for CodexMcpDriver {
                     .collect::<Vec<_>>()
                     .join("");
                 let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                self.last_tool_call_id.store(id, Ordering::Relaxed);
                 let mut args = serde_json::Map::new();
                 args.insert("prompt".into(), json!(prompt_text));
                 args.insert("cwd".into(), json!(self.cwd.display().to_string()));
@@ -159,7 +161,7 @@ impl Driver for CodexMcpDriver {
                 let note = json!({
                     "jsonrpc": JSONRPC_VERSION,
                     "method": "notifications/cancelled",
-                    "params": { "requestId": self.next_id.load(Ordering::Relaxed).saturating_sub(1) }
+                    "params": { "requestId": self.last_tool_call_id.load(Ordering::Relaxed) }
                 });
                 tx.send(note.to_string())
                     .await
@@ -281,9 +283,11 @@ impl CodexMcpBuilder {
 
         let thread_id = Arc::new(Mutex::new(None));
         let next_id = Arc::new(AtomicU64::new(1));
+        let last_tool_call_id = Arc::new(AtomicU64::new(0));
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResult>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let streamed_this_turn = Arc::new(AtomicBool::new(false));
+        let ready_emitted = Arc::new(AtomicBool::new(false));
         let exited = Arc::new(AtomicBool::new(false));
         let exit_status = Arc::new(Mutex::new(None));
 
@@ -294,6 +298,8 @@ impl CodexMcpBuilder {
             Arc::clone(&thread_id),
             Arc::clone(&pending),
             Arc::clone(&streamed_this_turn),
+            Arc::clone(&ready_emitted),
+            self.model.clone(),
             Arc::clone(&exited),
         ));
         tokio::spawn(stderr_drain(stderr));
@@ -304,6 +310,7 @@ impl CodexMcpBuilder {
             child: Some(child),
             thread_id: Arc::clone(&thread_id),
             next_id: Arc::clone(&next_id),
+            last_tool_call_id: Arc::clone(&last_tool_call_id),
             sandbox: self.sandbox.clone(),
             approval_policy: self.approval_policy.clone(),
             cwd: self.cwd.clone(),
@@ -311,9 +318,10 @@ impl CodexMcpBuilder {
             exited,
             exit_status,
         };
-        // `streamed_this_turn` lives inside the reader task only — the driver
-        // doesn't need a clone, the parser thread already has one.
-        let _ = streamed_this_turn;
+        // `streamed_this_turn` and `ready_emitted` live inside the reader task
+        // only — the driver doesn't need a clone, the parser thread already has one.
+        drop(streamed_this_turn);
+        drop(ready_emitted);
 
         // MCP handshake.
         let init_id = next_id.fetch_add(1, Ordering::Relaxed);
@@ -344,15 +352,6 @@ impl CodexMcpBuilder {
             .await
             .map_err(|_| DriverError::AgentExited)?;
 
-        // Synthetic Ready: thread_id is empty until the first tools/call fires
-        // `session_configured`. The reader will fill thread_id later.
-        let _ = reader_tx
-            .send(AgentEvent::Ready {
-                session_id: String::new(),
-                model: driver.model.clone(),
-            })
-            .await;
-
         Ok(driver)
     }
 }
@@ -377,13 +376,17 @@ async fn send_and_await(
         .lock()
         .expect("pending mutex poisoned")
         .insert(id, otx);
-    driver
+    if driver
         .writer_tx
         .as_ref()
         .ok_or(DriverError::AgentExited)?
         .send(req.to_string())
         .await
-        .map_err(|_| DriverError::AgentExited)?;
+        .is_err()
+    {
+        pending.lock().expect("pending mutex poisoned").remove(&id);
+        return Err(DriverError::AgentExited);
+    }
     match tokio::time::timeout(HANDSHAKE_TIMEOUT, orx).await {
         Ok(Ok(JsonRpcResult { inner: Ok(v) })) => Ok(v),
         Ok(Ok(JsonRpcResult {
@@ -428,6 +431,8 @@ async fn reader_task(
     thread_id: Arc<Mutex<Option<String>>>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResult>>>>,
     streamed_this_turn: Arc<AtomicBool>,
+    ready_emitted: Arc<AtomicBool>,
+    model: Option<String>,
     exited: Arc<AtomicBool>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
@@ -445,7 +450,7 @@ async fn reader_task(
                         continue;
                     }
                 };
-                for ev in process_frame(&frame, &thread_id, &pending, &streamed_this_turn) {
+                for ev in process_frame(&frame, &thread_id, &pending, &streamed_this_turn, &ready_emitted, &model) {
                     if tx.send(ev).await.is_err() {
                         exited.store(true, Ordering::Relaxed);
                         return;
@@ -462,8 +467,15 @@ async fn reader_task(
 
 async fn stderr_drain(stderr: tokio::process::ChildStderr) {
     let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        debug!(target: "cap_rs::codex_mcp::stderr", "{}", line);
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => debug!(target: "cap_rs::codex_mcp::stderr", "{}", line),
+            Ok(None) => return,
+            Err(e) => {
+                warn!(error = %e, "stderr read error");
+                return;
+            }
+        }
     }
 }
 
@@ -476,6 +488,8 @@ fn process_frame(
     thread_id: &Arc<Mutex<Option<String>>>,
     pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResult>>>>,
     streamed_this_turn: &Arc<AtomicBool>,
+    ready_emitted: &Arc<AtomicBool>,
+    model: &Option<String>,
 ) -> Vec<AgentEvent> {
     let has_method = frame.get("method").is_some();
 
@@ -496,7 +510,7 @@ fn process_frame(
 
     // Notification. We care about codex/event (the rich stream).
     if method == "codex/event" {
-        return handle_codex_event(&params, thread_id, streamed_this_turn);
+        return handle_codex_event(&params, thread_id, streamed_this_turn, ready_emitted, model);
     }
     Vec::new()
 }
@@ -583,6 +597,8 @@ fn handle_codex_event(
     params: &Value,
     thread_id: &Arc<Mutex<Option<String>>>,
     streamed_this_turn: &Arc<AtomicBool>,
+    ready_emitted: &Arc<AtomicBool>,
+    model: &Option<String>,
 ) -> Vec<AgentEvent> {
     let msg = params.get("msg").cloned().unwrap_or(Value::Null);
     let kind = msg.get("type").and_then(Value::as_str).unwrap_or("");
@@ -592,6 +608,12 @@ fn handle_codex_event(
                 let mut slot = thread_id.lock().expect("thread_id mutex poisoned");
                 if slot.is_none() {
                     *slot = Some(tid.to_string());
+                }
+                if !ready_emitted.swap(true, Ordering::Relaxed) {
+                    return vec![AgentEvent::Ready {
+                        session_id: tid.to_string(),
+                        model: model.clone(),
+                    }];
                 }
             }
             Vec::new()
@@ -734,6 +756,12 @@ mod tests {
     fn streamed_flag() -> Arc<AtomicBool> {
         Arc::new(AtomicBool::new(false))
     }
+    fn ready_flag() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+    fn no_model() -> Option<String> {
+        None
+    }
 
     #[test]
     fn session_configured_captures_thread_id() {
@@ -744,7 +772,9 @@ mod tests {
         )
         .unwrap();
         let tid = empty_thread();
-        assert!(process_frame(&frame, &tid, &empty_pending(), &streamed_flag()).is_empty());
+        let events = process_frame(&frame, &tid, &empty_pending(), &streamed_flag(), &ready_flag(), &no_model());
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::Ready { session_id, model } if session_id == "abc" && model.is_none()));
         assert_eq!(tid.lock().unwrap().clone(), Some("abc".into()));
     }
 
@@ -755,7 +785,7 @@ mod tests {
                "msg":{"type":"agent_message_content_delta","item_id":"msg_x","delta":"hello"}}}"#,
         )
         .unwrap();
-        let events = process_frame(&frame, &empty_thread(), &empty_pending(), &streamed_flag());
+        let events = process_frame(&frame, &empty_thread(), &empty_pending(), &streamed_flag(), &ready_flag(), &no_model());
         assert!(matches!(&events[0],
             AgentEvent::TextChunk { text, msg_id, .. } if text == "hello" && msg_id == "msg_x"));
     }
@@ -768,7 +798,7 @@ mod tests {
                "command":["ls","-la"]}}}}"#,
         )
         .unwrap();
-        let events = process_frame(&frame, &empty_thread(), &empty_pending(), &streamed_flag());
+        let events = process_frame(&frame, &empty_thread(), &empty_pending(), &streamed_flag(), &ready_flag(), &no_model());
         assert!(matches!(&events[0],
             AgentEvent::ToolCallStart { call_id, name, .. } if call_id == "i1" && name == "Bash"));
     }
@@ -781,7 +811,7 @@ mod tests {
                "output":"command not found","status":"failed"}}}}"#,
         )
         .unwrap();
-        let events = process_frame(&frame, &empty_thread(), &empty_pending(), &streamed_flag());
+        let events = process_frame(&frame, &empty_thread(), &empty_pending(), &streamed_flag(), &ready_flag(), &no_model());
         assert!(matches!(&events[0],
             AgentEvent::ToolCallEnd { call_id, is_error, output }
             if call_id == "i1" && *is_error && output == "command not found"));
@@ -796,7 +826,7 @@ mod tests {
                "content":[{"type":"text","text":"hello"}]}}"#,
         )
         .unwrap();
-        let events = process_frame(&frame, &empty_thread(), &empty_pending(), &streamed_flag());
+        let events = process_frame(&frame, &empty_thread(), &empty_pending(), &streamed_flag(), &ready_flag(), &no_model());
         assert_eq!(events.len(), 2, "got {events:?}");
         assert!(matches!(&events[0],
             AgentEvent::TextChunk { text, msg_id, .. } if text == "hello" && msg_id == "abc"));
@@ -821,7 +851,7 @@ mod tests {
                "msg":{"type":"agent_message_content_delta","item_id":"m","delta":"hello"}}}"#,
         )
         .unwrap();
-        let evs = process_frame(&delta, &empty_thread(), &empty_pending(), &streamed);
+        let evs = process_frame(&delta, &empty_thread(), &empty_pending(), &streamed, &ready_flag(), &no_model());
         assert!(matches!(&evs[0], AgentEvent::TextChunk { text, .. } if text == "hello"));
         assert!(streamed.load(Ordering::Relaxed), "flag set by delta");
 
@@ -832,7 +862,7 @@ mod tests {
                "structuredContent":{"threadId":"t","content":"hello"}}}"#,
         )
         .unwrap();
-        let evs = process_frame(&resp, &empty_thread(), &empty_pending(), &streamed);
+        let evs = process_frame(&resp, &empty_thread(), &empty_pending(), &streamed, &ready_flag(), &no_model());
         assert_eq!(evs.len(), 1, "got {evs:?}");
         assert!(matches!(&evs[0], AgentEvent::Done { .. }));
         // Flag resets per turn so a future turn can fall through to the fallback.
@@ -848,7 +878,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":2,"result":{"protocolVersion":"2024-11-05"}}"#,
         )
         .unwrap();
-        let events = process_frame(&frame, &empty_thread(), &pending, &streamed_flag());
+        let events = process_frame(&frame, &empty_thread(), &pending, &streamed_flag(), &ready_flag(), &no_model());
         assert!(events.is_empty(), "claimed response yields no event");
         assert!(rx.try_recv().is_ok());
     }
@@ -861,7 +891,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            process_frame(&frame, &empty_thread(), &empty_pending(), &streamed_flag()).is_empty()
+            process_frame(&frame, &empty_thread(), &empty_pending(), &streamed_flag(), &ready_flag(), &no_model()).is_empty()
         );
     }
 }
