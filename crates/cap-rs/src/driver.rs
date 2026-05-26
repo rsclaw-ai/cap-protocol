@@ -22,16 +22,18 @@ pub mod codex_mcp;
 #[cfg(feature = "acp")]
 pub mod acp;
 
+#[cfg(feature = "grpc")]
+pub mod grpc;
+
 // Future modules — gated on their respective features:
 // #[cfg(feature = "a2a")]          pub mod a2a;
-// #[cfg(feature = "grpc")]         pub mod grpc;
 // #[cfg(feature = "orchestrator")] pub mod orchestrator;
 
 // The Driver trait and DriverError are shared across all driver backends.
 // They're gated on `any(stream-json, pty, ...)` because their deps
 // (async-trait, thiserror) come in via those features.
 
-#[cfg(any(feature = "stream-json", feature = "pty", feature = "codex", feature = "acp"))]
+#[cfg(any(feature = "stream-json", feature = "pty", feature = "codex", feature = "acp", feature = "grpc"))]
 mod common {
     use crate::core::{AgentEvent, ClientFrame};
 
@@ -123,5 +125,5 @@ mod common {
     }
 }
 
-#[cfg(any(feature = "stream-json", feature = "pty", feature = "codex", feature = "acp"))]
+#[cfg(any(feature = "stream-json", feature = "pty", feature = "codex", feature = "acp", feature = "grpc"))]
 pub use common::{Driver, DriverError, DriverExitStatus};

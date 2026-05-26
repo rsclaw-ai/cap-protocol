@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use cap_rs::driver::Driver;
 use cap_rs::driver::acp::AcpDriver;
 use cap_rs::driver::codex_mcp::CodexMcpDriver;
+use cap_rs::driver::grpc::GrpcDriver;
 use cap_rs::driver::pty::{PtyDriver, TuiParser};
 use cap_rs::driver::stream_json::ClaudeCodeDriver;
 
@@ -61,6 +62,14 @@ impl DriverFactory for RealDriverFactory {
                     .sandbox(sandbox)
                     .spawn()
                     .await?;
+                Ok(Box::new(driver))
+            }
+            // grpc:<addr> — OpenClaude gRPC server (openclaude grpc).
+            // Connects to a running openclaude gRPC server at the given address.
+            // Permission policy is not passed to the gRPC server — it handles
+            // its own permission prompts via the ActionRequired protocol.
+            DriverKind::Grpc(addr) => {
+                let driver = GrpcDriver::connect(addr).await?;
                 Ok(Box::new(driver))
             }
             // acp:<cmd> — structured Agent Client Protocol agent (opencode,

@@ -9,7 +9,7 @@ repository.workspace   = true
 license.workspace      = true
 
 [dependencies]
-cap-rs = { path = "../cap-rs", features = ["stream-json", "pty", "acp", "codex"] }
+cap-rs = { path = "../cap-rs", features = ["stream-json", "pty", "acp", "codex", "grpc"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "process", "time"] }
 tokio-util = "0.7"
 serde = { version = "1", features = ["derive"] }

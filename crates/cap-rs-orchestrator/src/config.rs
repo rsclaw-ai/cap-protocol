@@ -47,13 +47,15 @@ pub enum PermissionPolicy {
     Bypass,
 }
 
-/// `claude` | `codex` | `acp:<command>` | `pty:<command>`.
+/// `claude` | `codex` | `grpc:<addr>` | `acp:<command>` | `pty:<command>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriverKind {
     Claude,
     Codex,
     /// Structured Agent Client Protocol agent (e.g. `acp:opencode`).
     Acp(String),
+    /// OpenClaude gRPC server (e.g. `grpc:localhost:50051`).
+    Grpc(String),
     Pty(String),
 }
 
@@ -64,7 +66,14 @@ impl<'de> Deserialize<'de> for DriverKind {
             "claude" => DriverKind::Claude,
             "codex" => DriverKind::Codex,
             other => {
-                if let Some(cmd) = other.strip_prefix("acp:") {
+                if let Some(cmd) = other.strip_prefix("grpc:") {
+                    if cmd.is_empty() {
+                        return Err(serde::de::Error::custom(
+                            "invalid grpc address '' — expected host:port",
+                        ));
+                    }
+                    DriverKind::Grpc(cmd.to_string())
+                } else if let Some(cmd) = other.strip_prefix("acp:") {
                     if cmd.is_empty() || !valid_binary_name(cmd) {
                         return Err(serde::de::Error::custom(format!(
                             "invalid acp command '{cmd}' — expected a binary name"
@@ -80,7 +89,7 @@ impl<'de> Deserialize<'de> for DriverKind {
                     DriverKind::Pty(cmd.to_string())
                 } else {
                     return Err(serde::de::Error::custom(format!(
-                        "unknown driver kind '{other}' (expected claude | codex | acp:<cmd> | pty:<cmd>)"
+                        "unknown driver kind '{other}' (expected claude | codex | grpc:<host:port> | acp:<cmd> | pty:<cmd>)"
                     )));
                 }
             }

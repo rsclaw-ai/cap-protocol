@@ -37,7 +37,7 @@ stream-json  = ["dep:tokio", "dep:tokio-util", "dep:async-trait", "dep:thiserror
 codex        = ["dep:tokio", "dep:async-trait", "dep:thiserror", "dep:tracing"]
 acp          = ["dep:tokio", "dep:async-trait", "dep:thiserror", "dep:tracing"]
 a2a          = []
-grpc         = []
+grpc         = ["dep:tokio", "dep:tokio-stream", "dep:async-trait", "dep:thiserror", "dep:tracing", "dep:tonic", "dep:prost"]
 orchestrator = []
 
 full         = ["pty", "stream-json", "codex", "acp", "a2a", "grpc", "orchestrator"]
@@ -56,10 +56,20 @@ tracing      = { version = "0.1",                        optional = true }
 # stream-json specific.
 tokio-util   = { version = "0.7", features = ["codec"],  optional = true }
 
+# gRPC streaming.
+tokio-stream = { version = "0.1", features = ["sync"],    optional = true }
+
 # pty specific.
 portable-pty = { version = "0.9",                        optional = true }
 vt100        = { version = "0.16",                       optional = true }
 regex-lite   = { version = "0.1",                        optional = true }
+
+# gRPC specific.
+tonic        = { version = "0.12",                       optional = true }
+prost        = { version = "0.13",                       optional = true }
+
+[build-dependencies]
+tonic-build = "0.12"
 
 [dev-dependencies]
 anyhow = "1.0.102"
@@ -100,3 +110,8 @@ required-features = ["codex"]
 name = "codex_smoke"
 path = "examples/codex_smoke.rs"
 required-features = ["codex"]
+
+[[example]]
+name = "grpc_hello"
+path = "examples/grpc_hello.rs"
+required-features = ["grpc"]
