@@ -112,14 +112,6 @@ pub fn spawn_session(
     }
 }
 
-/// Result of one call to [`pump_turn`].
-enum TurnResult {
-    /// The driver emitted `Done`; the actor should exit cleanly.
-    SessionEnded,
-    /// An error or cancellation occurred; the actor should stop.
-    Stop,
-}
-
 /// Send to bus with cancel awareness — never blocks if cancelled.
 async fn bus_send(
     bus: &mpsc::Sender<OrchestratorEvent>,
@@ -133,8 +125,8 @@ async fn bus_send(
     }
 }
 
-/// Pump events until `Done`. Returns a [`TurnResult`] telling the outer loop
-/// what to do next.
+/// Pump events until `Done`. The actor task exits after the turn completes,
+/// regardless of whether the session ended cleanly, by error, or cancellation.
 async fn pump_turn(
     id: &SessionId,
     driver: &mut Box<dyn Driver>,
@@ -142,11 +134,11 @@ async fn pump_turn(
     bus: &mpsc::Sender<OrchestratorEvent>,
     inbox_rx: &mut mpsc::Receiver<ClientFrame>,
     cancel: &CancellationToken,
-) -> TurnResult {
+) {
     loop {
         let ev = tokio::select! {
             biased;
-            _ = cancel.cancelled() => { let _ = driver.shutdown().await; return TurnResult::Stop; }
+            _ = cancel.cancelled() => { let _ = driver.shutdown().await; return; }
             ev = driver.next_event() => ev,
         };
 
@@ -160,7 +152,7 @@ async fn pump_turn(
                 cancel,
             )
             .await;
-            return TurnResult::Stop;
+            return;
         };
 
         match ev {
@@ -177,7 +169,7 @@ async fn pump_turn(
                 // A `Done` event is terminal for this session: the driver has
                 // finished its work. Exit the actor so callers awaiting `join`
                 // are not blocked. Multi-turn use-cases open a fresh session.
-                return TurnResult::SessionEnded;
+                return;
             }
             AgentEvent::PermissionRequest {
                 ref req_id,
@@ -218,7 +210,7 @@ async fn pump_turn(
                         // also checks cancellation before blocking on inbox_rx.
                         tokio::select! {
                             biased;
-                            _ = cancel.cancelled() => { let _ = driver.shutdown().await; return TurnResult::Stop; }
+                            _ = cancel.cancelled() => { let _ = driver.shutdown().await; return; }
                             maybe = inbox_rx.recv() => match maybe {
                                 Some(ClientFrame::PermissionResponse { decision, .. }) => decision,
                                 _ => PermissionDecision::Deny,
@@ -240,7 +232,7 @@ async fn pump_turn(
                         cancel,
                     )
                     .await;
-                    return TurnResult::Stop;
+                    return;
                 }
             }
             AgentEvent::ReverseRpc { ref rpc_id, ref rpc } => {
@@ -259,7 +251,7 @@ async fn pump_turn(
                 // Wait for the consumer to respond.
                 let result = tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => { let _ = driver.shutdown().await; return TurnResult::Stop; }
+                    _ = cancel.cancelled() => { let _ = driver.shutdown().await; return; }
                     maybe = inbox_rx.recv() => match maybe {
                         Some(ClientFrame::ReverseRpcResult { result, .. }) => result,
                         _ => ReverseRpcResult::Success { ok: false },
@@ -281,7 +273,7 @@ async fn pump_turn(
                         cancel,
                     )
                     .await;
-                    return TurnResult::Stop;
+                    return;
                 }
             }
             other => {

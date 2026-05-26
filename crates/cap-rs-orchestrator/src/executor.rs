@@ -264,24 +264,33 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                         self.buffers.entry(session.clone()).or_default().push_str(text);
                     }
 
-                    // Forward every engine event to the consumer.
-                    let _ = self.out.send(ev.clone()).await;
-
+                    let session_failed_id = match &ev {
+                        OrchestratorEvent::SessionFailed { session, .. } => Some(session.clone()),
+                        _ => None,
+                    };
                     match ev {
                         OrchestratorEvent::SessionDone { session, stop_reason } => {
+                            // Don't forward SessionDone before routing — the consumer
+                            // may see SessionFailed instead if routing (e.g. by_subtask)
+                            // fails. on_session_done sends the appropriate event.
                             if self.on_session_done(&session, stop_reason).await {
                                 let _ = self.out.send(OrchestratorEvent::FleetComplete).await;
                                 break;
                             }
                         }
-                        OrchestratorEvent::SessionFailed { session, .. } => {
-                            self.failed.insert(session);
+                        ev @ OrchestratorEvent::SessionFailed { .. } => {
+                            let _ = self.out.send(ev).await;
                             if self.fleet_complete() {
                                 let _ = self.out.send(OrchestratorEvent::FleetComplete).await;
                                 break;
                             }
                         }
-                        _ => {}
+                        other => {
+                            let _ = self.out.send(other).await;
+                        }
+                    }
+                    if let Some(fail_id) = session_failed_id {
+                        self.failed.insert(fail_id);
                     }
                 }
             }
@@ -341,6 +350,9 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
     }
 
     /// React to a session finishing. Returns `true` when the fleet is complete.
+    /// Forwards `SessionDone` to the consumer before processing routes (so the
+    /// consumer sees done-then-routed ordering), or `SessionFailed` when routing
+    /// (e.g. `by_subtask`) fails (no `SessionDone` emitted).
     async fn on_session_done(&mut self, session: &SessionId, stop: StopReason) -> bool {
         debug!(%session, ?stop, "session done");
         self.done.insert(session.clone());
@@ -354,6 +366,7 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
         }
 
         let mut fires: Vec<Fire> = Vec::new();
+        let mut routing_failed = false;
 
         for route in &self.spec.fleet.routes {
             let triggers = route.trigger_sessions();
@@ -384,11 +397,14 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                                     fires.push(Fire::Route(to.clone(), task_prompt(&sub)));
                                 }
                             }
-                            _ => fires.push(Fire::FailLead(
-                                "fan_out by_subtask: lead emitted no parseable \
-                                 cap-subtasks JSON-array block"
-                                    .into(),
-                            )),
+                            _ => {
+                                routing_failed = true;
+                                fires.push(Fire::FailLead(
+                                    "fan_out by_subtask: lead emitted no parseable \
+                                     cap-subtasks JSON-array block"
+                                        .into(),
+                                ));
+                            }
                         }
                     }
                 },
@@ -396,7 +412,31 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
             }
         }
 
+        // Forward SessionDone before processing routes (done → routed ordering).
+        // When routing fails, send SessionFailed instead (no done).
         let from = session.clone();
+        if routing_failed {
+            self.done.remove(&from);
+            self.failed.insert(from.clone());
+            let _ = self
+                .out
+                .send(OrchestratorEvent::SessionFailed {
+                    session: from.clone(),
+                    error: "fan_out by_subtask: lead emitted no parseable \
+                             cap-subtasks JSON-array block"
+                        .into(),
+                })
+                .await;
+        } else {
+            let _ = self
+                .out
+                .send(OrchestratorEvent::SessionDone {
+                    session: from.clone(),
+                    stop_reason: stop,
+                })
+                .await;
+        }
+
         for fire in fires {
             match fire {
                 Fire::Route(to, frame) => {
@@ -423,13 +463,9 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                         .await;
                 }
                 Fire::FailLead(error) => {
-                    let _ = self
-                        .out
-                        .send(OrchestratorEvent::SessionFailed {
-                            session: from.clone(),
-                            error,
-                        })
-                        .await;
+                    // FailLead is handled above; this arm is unreachable but
+                    // kept for exhaustiveness.
+                    tracing::warn!(%from, error, "unreachable FailLead arm hit");
                 }
             }
         }

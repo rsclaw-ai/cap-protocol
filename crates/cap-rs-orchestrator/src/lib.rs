@@ -12,6 +12,7 @@ pub mod factory;
 pub mod real_factory;
 pub mod registry;
 pub mod session;
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod worktree;
 

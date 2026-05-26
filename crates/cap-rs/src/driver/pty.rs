@@ -560,6 +560,16 @@ impl TuiParser {
         )
     }
 
+    /// Parser tuned for `openclaude`. Uses `>` prompt from the reference
+    /// manifest. Falls back to the generic marker set as well.
+    pub fn openclaude() -> Self {
+        Self::custom(
+            "openclaude",
+            &[r">\s*$", r"›", r"❯"],
+            Duration::from_millis(800),
+        )
+    }
+
     /// Generic full-screen TUI fallback for an unknown `pty:<cmd>` agent.
     /// Accepts the usual prompt glyphs. Turn detection is best-effort until a
     /// real marker is captured for the specific agent.
@@ -628,6 +638,35 @@ impl TuiParser {
 
     /// True if any of the last few non-empty screen lines matches a ready
     /// marker (the input prompt is showing at the bottom).
+    /// Strip trailing prompt/status lines from a screen capture so the
+    /// TextChunk sent downstream contains only the assistant's output, not
+    /// the TUI chrome (input prompt, empty lines at the bottom).
+    fn strip_chrome(&self, screen: &str) -> String {
+        let lines: Vec<&str> = screen.lines().collect();
+        let keep: Vec<&str> = lines
+            .iter()
+            .rev()
+            .skip_while(|line| {
+                let trimmed = line.trim_end_matches(['\n', '\r']);
+                trimmed.is_empty()
+                    || self.ready_markers.iter().any(|re| re.is_match(trimmed))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .copied()
+            .collect();
+        if keep.is_empty() {
+            return screen.to_string();
+        }
+        if keep.len() == lines.len() {
+            return screen.to_string();
+        }
+        let mut out = keep.join("\n");
+        out.push('\n');
+        out
+    }
+
     fn at_prompt(&self, screen: &str) -> bool {
         screen
             .lines()
@@ -744,10 +783,11 @@ impl AgentParser for TuiParser {
 
         self.dirty_since_boundary = false;
         self.turn += 1;
+        let text = self.strip_chrome(&self.last_screen);
         vec![
             AgentEvent::TextChunk {
                 msg_id: format!("turn_{}", self.turn),
-                text: self.last_screen.clone(),
+                text,
                 channel: TextChannel::Assistant,
             },
             AgentEvent::Done {
@@ -762,7 +802,7 @@ impl AgentParser for TuiParser {
         if self.dirty_since_boundary && !self.last_screen.is_empty() {
             events.push(AgentEvent::TextChunk {
                 msg_id: format!("turn_{}", self.turn),
-                text: self.last_screen.clone(),
+                text: self.strip_chrome(&self.last_screen),
                 channel: TextChannel::Assistant,
             });
         }

@@ -6,7 +6,8 @@
 //!
 //! `pty:<cmd>` remains the universal screen-scraping fallback; `pty:codex`
 //! still works (with the codex-tuned [`TuiParser::codex`]) if a caller needs
-//! the old behavior.
+//! the old behavior. `pty:openclaude` uses a tuned parser with `>` prompt
+//! markers from the reference manifest.
 
 use std::path::Path;
 
@@ -87,6 +88,7 @@ impl DriverFactory for RealDriverFactory {
                 let parser = match cmd.as_str() {
                     "codex" => TuiParser::codex(),
                     "opencode" => TuiParser::opencode(),
+                    "openclaude" => TuiParser::openclaude(),
                     _ => TuiParser::generic(),
                 };
                 let driver = builder.spawn(parser)?;

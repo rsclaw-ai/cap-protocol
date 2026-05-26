@@ -20,5 +20,8 @@ thiserror = "2"
 tempfile = "3"
 tracing = "0.1"
 
+[features]
+testing = []
+
 [dev-dependencies]
 anyhow = "1"
