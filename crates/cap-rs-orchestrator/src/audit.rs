@@ -59,7 +59,7 @@ impl AuditLog {
             at: Self::now_millis(),
             event,
         });
-        self.records.last().unwrap()
+        self.records.last().expect("just-pushed record must exist")
     }
 
     pub fn record_route(&mut self, from: &str, to: &str) -> &AuditRecord {

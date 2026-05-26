@@ -24,8 +24,7 @@ pub struct StubDriver {
     name: String,
     queue: VecDeque<AgentEvent>,
     alive: bool,
-    #[allow(dead_code)]
-    pub last_decision: Option<cap_rs::core::PermissionDecision>,
+    last_decision: Option<cap_rs::core::PermissionDecision>,
     captured: Option<Arc<Mutex<Vec<String>>>>,
     /// Mirrors `Driver::prompt_after_ready` — makes the actor wait for a
     /// scripted `Ready` before sending the prompt.
@@ -94,6 +93,11 @@ impl StubDriver {
         self.captured = Some(sink);
         self
     }
+
+    /// The most recent `PermissionDecision` received via `send()`, if any.
+    pub fn last_decision(&self) -> Option<cap_rs::core::PermissionDecision> {
+        self.last_decision
+    }
 }
 
 #[async_trait::async_trait]
@@ -112,7 +116,7 @@ impl Driver for StubDriver {
                             _ => None,
                         })
                         .collect();
-                    sink.lock().unwrap().push(text);
+                    sink.lock().expect("capture sink mutex poisoned").push(text);
                 }
             }
             _ => {}
@@ -157,7 +161,7 @@ impl StubDriverFactory {
     pub fn with(self, session: &str, driver: StubDriver) -> Self {
         self.scripts
             .lock()
-            .unwrap()
+            .expect("stub factory mutex poisoned")
             .insert(session.to_string(), driver);
         self
     }
@@ -174,7 +178,7 @@ impl DriverFactory for StubDriverFactory {
     ) -> Result<Box<dyn cap_rs::driver::Driver>, OrchestratorError> {
         self.scripts
             .lock()
-            .unwrap()
+            .expect("stub factory mutex poisoned")
             .remove(session)
             .map(|d| Box::new(d) as Box<dyn cap_rs::driver::Driver>)
             .ok_or_else(|| OrchestratorError::Config(format!("no stub for session '{session}'")))

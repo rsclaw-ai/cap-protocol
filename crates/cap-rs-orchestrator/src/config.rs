@@ -406,7 +406,10 @@ impl FleetSpec {
             match color[node] {
                 Color::Black => return Ok(()),
                 Color::Gray => {
-                    let cycle_start = path.iter().position(|n| *n == node).unwrap();
+                    let cycle_start = path
+                        .iter()
+                        .position(|n| *n == node)
+                        .expect("cycle node must be on current DFS path");
                     let cycle: Vec<&str> = path[cycle_start..].to_vec();
                     return Err(OrchestratorError::Config(format!(
                         "route cycle detected: {}",

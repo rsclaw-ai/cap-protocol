@@ -147,9 +147,7 @@ impl Content {
     pub fn text(s: impl Into<String>) -> Self {
         Content::Text { text: s.into() }
     }
-}
 
-impl Content {
     /// Convenience constructor for images that copies a byte slice into
     /// the `Arc` storage.
     pub fn image(mime: impl Into<String>, data: impl Into<Arc<[u8]>>) -> Self {
@@ -372,7 +370,9 @@ pub enum ReverseRpcResult {
     /// Free-text response (e.g. `cap.user_io.input` result).
     TextResult { text: String },
 }
+/// One entry in an agent's published plan (spec §7.3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PlanEntry {
     pub id: String,
     pub content: String,
@@ -426,9 +426,13 @@ pub enum AskKind {
     },
 }
 
+/// One selectable option in an `AskUser` prompt.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AskOption {
+    /// Machine-readable option identifier.
     pub id: String,
+    /// Human-readable display label.
     pub label: String,
 }
 

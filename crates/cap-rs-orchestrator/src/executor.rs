@@ -392,7 +392,7 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                     Split::BySubtask => {
                         let buf = self.buffers.get(session).cloned().unwrap_or_default();
                         match parse_subtasks(&buf) {
-                            Some(items) if !items.is_empty() => {
+                            Some(items) => {
                                 for (i, to) in f.to.iter().enumerate() {
                                     // Guard against more targets than subtasks:
                                     // stop assigning rather than wrapping around.
@@ -485,11 +485,20 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
 /// Parse a fenced `cap-subtasks` block — a JSON array of strings — out of agent
 /// text. The fence is three backticks; the delimiter is built at runtime so
 /// this source stays free of literal triple-backticks.
+/// Hard cap on subtasks per fan-out to bound allocations from runaway agent
+/// output. 256 is generous for any realistic decomposition.
+const MAX_SUBTASKS: usize = 256;
+
 fn parse_subtasks(text: &str) -> Option<Vec<String>> {
     let fence = "`".repeat(3);
     let open = format!("{fence}cap-subtasks");
     let start = text.find(&open)? + open.len();
     let rest = &text[start..];
     let end = rest.find(&fence)?;
-    serde_json::from_str::<Vec<String>>(rest[..end].trim()).ok()
+    let mut items: Vec<String> = serde_json::from_str(rest[..end].trim()).ok()?;
+    if items.is_empty() {
+        return None;
+    }
+    items.truncate(MAX_SUBTASKS);
+    Some(items)
 }

@@ -636,8 +636,6 @@ impl TuiParser {
             .map(|l| l.to_string())
     }
 
-    /// True if any of the last few non-empty screen lines matches a ready
-    /// marker (the input prompt is showing at the bottom).
     /// Strip trailing prompt/status lines from a screen capture so the
     /// TextChunk sent downstream contains only the assistant's output, not
     /// the TUI chrome (input prompt, empty lines at the bottom).
@@ -666,6 +664,8 @@ impl TuiParser {
         out
     }
 
+    /// True if any of the last few non-empty screen lines matches a ready
+    /// marker (the input prompt is showing at the bottom).
     fn at_prompt(&self, screen: &str) -> bool {
         screen
             .lines()
@@ -1152,21 +1152,21 @@ impl PtyDriverBuilder {
         // parser thread can apply an idle timer (`recv_timeout`) that the
         // blocking PTY `read()` loop in the reader thread cannot provide.
         let (raw_tx, raw_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        spawn_reader_thread(reader, raw_tx);
+        spawn_reader_thread(reader, raw_tx)?;
         spawn_parser_thread(
             parser,
             raw_rx,
             event_tx.clone(),
             input_tx.clone(),
             std::sync::Arc::clone(&exited),
-        );
-        spawn_writer_thread(writer, input_rx);
+        )?;
+        spawn_writer_thread(writer, input_rx)?;
         spawn_child_waiter(
             child,
             event_tx,
             std::sync::Arc::clone(&exited),
             std::sync::Arc::clone(&exit_status),
-        );
+        )?;
 
         // Drop slave — only master is kept.
         drop(pair.slave);
@@ -1192,7 +1192,7 @@ impl PtyDriverBuilder {
 fn spawn_reader_thread(
     mut reader: Box<dyn std::io::Read + Send>,
     raw_tx: std::sync::mpsc::Sender<Vec<u8>>,
-) {
+) -> Result<(), DriverError> {
     std::thread::Builder::new()
         .name("cap-rs-pty-reader".into())
         .spawn(move || {
@@ -1218,7 +1218,8 @@ fn spawn_reader_thread(
             }
             // Dropping raw_tx here ends the parser thread's recv loop.
         })
-        .expect("failed to spawn PTY reader thread");
+        .map_err(|e| DriverError::Io(std::io::Error::other(e.to_string())))?;
+    Ok(())
 }
 
 /// Parser thread: owns the [`AgentParser`] and the event channel. Consumes raw
@@ -1232,7 +1233,7 @@ fn spawn_parser_thread<P: AgentParser>(
     tx: mpsc::Sender<AgentEvent>,
     input_tx: mpsc::Sender<Vec<u8>>,
     exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) {
+) -> Result<(), DriverError> {
     use std::sync::mpsc::RecvTimeoutError;
     std::thread::Builder::new()
         .name("cap-rs-pty-parser".into())
@@ -1278,13 +1279,14 @@ fn spawn_parser_thread<P: AgentParser>(
             }
             exited.store(true, std::sync::atomic::Ordering::Relaxed);
         })
-        .expect("failed to spawn PTY parser thread");
+        .map_err(|e| DriverError::Io(std::io::Error::other(e.to_string())))?;
+    Ok(())
 }
 
 fn spawn_writer_thread(
     mut writer: Box<dyn std::io::Write + Send>,
     mut rx: mpsc::Receiver<Vec<u8>>,
-) {
+) -> Result<(), DriverError> {
     std::thread::Builder::new()
         .name("cap-rs-pty-writer".into())
         .spawn(move || {
@@ -1300,7 +1302,8 @@ fn spawn_writer_thread(
             }
             trace!("PTY writer: input channel closed, exiting");
         })
-        .expect("failed to spawn PTY writer thread");
+        .map_err(|e| DriverError::Io(std::io::Error::other(e.to_string())))?;
+    Ok(())
 }
 
 fn spawn_child_waiter(
@@ -1308,7 +1311,7 @@ fn spawn_child_waiter(
     event_tx: mpsc::Sender<AgentEvent>,
     exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
     exit_status: std::sync::Arc<std::sync::Mutex<Option<DriverExitStatus>>>,
-) {
+) -> Result<(), DriverError> {
     std::thread::Builder::new()
         .name("cap-rs-pty-waiter".into())
         .spawn(move || {
@@ -1326,7 +1329,8 @@ fn spawn_child_waiter(
             exited.store(true, std::sync::atomic::Ordering::Relaxed);
             drop(event_tx);
         })
-        .expect("failed to spawn PTY child waiter thread");
+        .map_err(|e| DriverError::Io(std::io::Error::other(e.to_string())))?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -283,6 +283,7 @@ impl AcpBuilder {
         tokio::spawn(reader_task(
             stdout,
             reader_tx.clone(),
+            writer_tx.clone(),
             Arc::clone(&pending_responses),
             Arc::clone(&pending_perms),
             Arc::clone(&exited),
@@ -476,6 +477,7 @@ async fn writer_task(mut stdin: tokio::process::ChildStdin, mut rx: mpsc::Receiv
 async fn reader_task(
     stdout: tokio::process::ChildStdout,
     tx: mpsc::Sender<AgentEvent>,
+    writer_tx: mpsc::Sender<String>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResult>>>>,
     pending_perms: Arc<Mutex<HashMap<String, (Value, Value)>>>,
     exited: Arc<AtomicBool>,
@@ -495,7 +497,7 @@ async fn reader_task(
                         continue;
                     }
                 };
-                for ev in process_frame(&frame, &pending, &pending_perms) {
+                for ev in process_frame(&frame, &writer_tx, &pending, &pending_perms) {
                     if tx.send(ev).await.is_err() {
                         exited.store(true, Ordering::Relaxed);
                         return;
@@ -530,6 +532,7 @@ async fn stderr_drain(stderr: tokio::process::ChildStderr) {
 
 fn process_frame(
     frame: &Value,
+    writer_tx: &mpsc::Sender<String>,
     pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResult>>>>,
     pending_perms: &Arc<Mutex<HashMap<String, (Value, Value)>>>,
 ) -> Vec<AgentEvent> {
@@ -549,6 +552,7 @@ fn process_frame(
             method,
             &frame.get("id").cloned().unwrap_or(Value::Null),
             &params,
+            writer_tx,
             pending_perms,
         );
     }
@@ -619,6 +623,7 @@ fn handle_server_request(
     method: &str,
     id: &Value,
     params: &Value,
+    writer_tx: &mpsc::Sender<String>,
     pending_perms: &Arc<Mutex<HashMap<String, (Value, Value)>>>,
 ) -> Vec<AgentEvent> {
     let req_id = match id {
@@ -679,10 +684,23 @@ fn handle_server_request(
             }]
         }
         // We advertised no fs/terminal capability, so the agent should never
-        // call back for those. Anything else is ignored (the agent does not
-        // block on it).
+        // call back for those. But if it does, we MUST send a JSON-RPC error
+        // response — otherwise the agent blocks forever waiting for a reply.
         other => {
-            trace!(method = other, "acp: unhandled server request, ignoring");
+            trace!(
+                method = other,
+                "acp: unhandled server request, sending error"
+            );
+            let error_resp = json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "id": id,
+                "error": {
+                    "code": -32601,
+                    "message": format!("method not supported: {other}")
+                }
+            });
+            // try_send to avoid blocking the reader thread on a slow writer.
+            let _ = writer_tx.try_send(format!("{error_resp}\n"));
             Vec::new()
         }
     }
@@ -862,6 +880,9 @@ mod tests {
     fn empty_perms() -> Arc<Mutex<HashMap<String, (Value, Value)>>> {
         Arc::new(Mutex::new(HashMap::new()))
     }
+    fn empty_writer() -> mpsc::Sender<String> {
+        mpsc::channel::<String>(1).0
+    }
 
     #[test]
     fn agent_message_chunk_becomes_textchunk() {
@@ -871,7 +892,7 @@ mod tests {
                "content":{"type":"text","text":"hello"}}}}"#,
         )
         .unwrap();
-        let events = process_frame(&frame, &empty_pending(), &empty_perms());
+        let events = process_frame(&frame, &empty_writer(), &empty_pending(), &empty_perms());
         assert!(matches!(&events[0],
             AgentEvent::TextChunk { text, channel, msg_id }
             if text == "hello" && *channel == TextChannel::Assistant && msg_id == "m1"));
@@ -885,7 +906,7 @@ mod tests {
                "content":{"type":"text","text":"hmm"}}}}"#,
         )
         .unwrap();
-        let events = process_frame(&frame, &empty_pending(), &empty_perms());
+        let events = process_frame(&frame, &empty_writer(), &empty_pending(), &empty_perms());
         assert!(matches!(&events[0], AgentEvent::Thought { text, .. } if text == "hmm"));
     }
 
@@ -897,7 +918,7 @@ mod tests {
                "usage":{"totalTokens":29796,"inputTokens":29782,"outputTokens":2,"thoughtTokens":12}}}"#,
         )
         .unwrap();
-        let events = process_frame(&frame, &empty_pending(), &empty_perms());
+        let events = process_frame(&frame, &empty_writer(), &empty_pending(), &empty_perms());
         match &events[0] {
             AgentEvent::Done { stop_reason, usage } => {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
@@ -919,7 +940,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"ses_abc","configOptions":[]}}"#,
         )
         .unwrap();
-        let events = process_frame(&frame, &pending, &empty_perms());
+        let events = process_frame(&frame, &empty_writer(), &pending, &empty_perms());
         assert!(
             events.is_empty(),
             "claimed handshake response yields no event"
@@ -941,7 +962,7 @@ mod tests {
         )
         .unwrap();
         let perms = empty_perms();
-        let events = process_frame(&frame, &empty_pending(), &perms);
+        let events = process_frame(&frame, &empty_writer(), &empty_pending(), &perms);
         assert!(matches!(&events[0],
             AgentEvent::PermissionRequest { req_id, tool, .. } if req_id == "7" && tool == "bash"));
         let (_, options) = perms.lock().unwrap().get("7").cloned().expect("stored");
@@ -963,7 +984,9 @@ mod tests {
                "update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}}"#,
         )
         .unwrap();
-        assert!(process_frame(&frame, &empty_pending(), &empty_perms()).is_empty());
+        assert!(
+            process_frame(&frame, &empty_writer(), &empty_pending(), &empty_perms()).is_empty()
+        );
     }
 
     #[test]
@@ -975,7 +998,7 @@ mod tests {
                                                  {"const":"sqlite","title":"SQLite"}]}}}"#,
         )
         .unwrap();
-        let events = process_frame(&frame, &empty_pending(), &empty_perms());
+        let events = process_frame(&frame, &empty_writer(), &empty_pending(), &empty_perms());
         match &events[0] {
             AgentEvent::AskUser {
                 ask_id,

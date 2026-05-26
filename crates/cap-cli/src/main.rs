@@ -7,7 +7,7 @@ use cap_rs_orchestrator::event::{OrchestratorControl, OrchestratorEvent};
 use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-#[derive(Parser)]
+#[derive(Debug, Parser)]
 #[command(
     name = "cap",
     version,
@@ -18,7 +18,7 @@ struct Cli {
     command: Command,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Command {
     /// Run a fleet of collaborating agents described by a fleet.yaml.
     Run {

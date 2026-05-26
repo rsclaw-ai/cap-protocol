@@ -54,6 +54,16 @@ impl WorktreeManager for GitWorktreeManager {
                 "invalid session name '{session}' — rejected by worktree manager"
             )));
         }
+        // Auto-init if not a git repo
+        if !self.repo.join(".git").exists() {
+            self.git(&["init", "-q", "-b", base_branch])?;
+            let gitignore = self.repo.join(".gitignore");
+            if !gitignore.exists() {
+                std::fs::write(&gitignore, b".cap/\n").ok();
+            }
+            self.git(&["add", "."])?;
+            self.git(&["commit", "-qm", "init"])?;
+        }
         let dir = self.dir_for(session);
         let dir_str = dir.to_string_lossy().to_string();
         let branch = format!("cap/{session}");
