@@ -20,8 +20,8 @@ pub mod proto {
 }
 
 use proto::{
-    agent_service_client::AgentServiceClient, client_message, server_message, CancelSignal,
-    ChatRequest, ClientMessage, ServerMessage,
+    CancelSignal, ChatRequest, ClientMessage, ServerMessage,
+    agent_service_client::AgentServiceClient, client_message, server_message,
 };
 
 /// Driver for the OpenClaude gRPC server (`openclaude grpc`).
@@ -39,6 +39,17 @@ impl std::fmt::Debug for GrpcDriver {
     }
 }
 
+impl Drop for GrpcDriver {
+    fn drop(&mut self) {
+        // Abort the background gRPC stream task to prevent task leaks.
+        // If shutdown() was called explicitly, the handle is already taken.
+        if let Some(handle) = self.task_handle.take() {
+            handle.abort();
+        }
+        self.alive.store(false, Ordering::Relaxed);
+    }
+}
+
 impl GrpcDriver {
     /// Connect to the openclaude gRPC server at `host:port`.
     pub async fn connect(addr: impl AsRef<str>) -> Result<Self, DriverError> {
@@ -53,7 +64,7 @@ impl GrpcDriver {
             if let Err(e) = run_stream(&addr, event_tx, frame_rx).await {
                 error!("gRPC stream error: {e}");
             }
-            alive_clone.store(false, Ordering::SeqCst);
+            alive_clone.store(false, Ordering::Relaxed);
         });
 
         Ok(Self {
@@ -72,13 +83,12 @@ async fn run_stream(
     mut frame_rx: mpsc::Receiver<ClientFrame>,
 ) -> Result<(), DriverError> {
     // Wait for the first frame so we can send it in the initial gRPC request.
-    let first_frame = frame_rx
-        .recv()
-        .await
-        .ok_or_else(|| DriverError::Io(std::io::Error::new(
+    let first_frame = frame_rx.recv().await.ok_or_else(|| {
+        DriverError::Io(std::io::Error::new(
             std::io::ErrorKind::ConnectionAborted,
             "stream closed before first frame",
-        )))?;
+        ))
+    })?;
 
     let mut client = AgentServiceClient::connect(format!("http://{addr}"))
         .await
@@ -90,12 +100,12 @@ async fn run_stream(
     // Build the first message and a stream for subsequent ones.
     let first_msg = frame_to_client_message(first_frame);
     let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel::<ClientMessage>();
-    request_tx
-        .send(first_msg)
-        .map_err(|_| DriverError::Io(std::io::Error::new(
+    request_tx.send(first_msg).map_err(|_| {
+        DriverError::Io(std::io::Error::new(
             std::io::ErrorKind::BrokenPipe,
             "gRPC request channel closed",
-        )))?;
+        ))
+    })?;
 
     let request_stream = tokio_stream::wrappers::UnboundedReceiverStream::new(request_rx);
 
@@ -217,10 +227,10 @@ fn translate_server_message(msg: ServerMessage) -> Result<Option<AgentEvent>, Dr
             output: result.output,
             is_error: result.is_error,
         })),
-        Some(Event::ActionRequired(_action)) => Ok(Some(AgentEvent::PermissionRequest {
-            req_id: String::new(),
+        Some(Event::ActionRequired(action)) => Ok(Some(AgentEvent::PermissionRequest {
+            req_id: action.prompt_id,
             tool: String::new(),
-            intent: serde_json::Value::Null,
+            intent: serde_json::json!({ "question": action.question }),
             scope: crate::core::PermissionScope::Execute,
             risk_level: crate::core::RiskLevel::Medium,
         })),
@@ -256,7 +266,7 @@ impl Driver for GrpcDriver {
     }
 
     async fn shutdown(&mut self) -> Result<(), DriverError> {
-        self.alive.store(false, Ordering::SeqCst);
+        self.alive.store(false, Ordering::Relaxed);
         self.exit_status = Some(DriverExitStatus::Killed);
         if let Some(handle) = self.task_handle.take() {
             handle.abort();
@@ -265,7 +275,7 @@ impl Driver for GrpcDriver {
     }
 
     fn is_alive(&self) -> bool {
-        self.alive.load(Ordering::SeqCst)
+        self.alive.load(Ordering::Relaxed)
     }
 
     fn exit_status(&self) -> Option<DriverExitStatus> {

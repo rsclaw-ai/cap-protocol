@@ -316,6 +316,17 @@ pub enum TextChannel {
     System,
 }
 
+/// Severity level for `cap.user_io.show` notifications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationLevel {
+    #[default]
+    Info,
+    Warn,
+    Error,
+}
+
 /// Spec §8 Reverse RPC — a method the agent invokes against the orchestrator.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -326,8 +337,8 @@ pub enum ReverseRpc {
     UserIoShow {
         title: String,
         body: String,
-        /// "info" | "warn" | "error"
-        level: String,
+        #[serde(default)]
+        level: NotificationLevel,
     },
     /// Request free-form text input from the user (§8.2 `cap.user_io.input`).
     #[serde(rename = "cap.user_io.input")]
@@ -347,16 +358,19 @@ pub enum ReverseRpc {
 }
 
 /// Result of a handled Reverse RPC call.
+///
+/// Uses `#[serde(untagged)]` — variant order matters for deserialization.
+/// `Success` is tried first (matches `{ "ok": bool }`); `TextResult` second
+/// (matches `{ "text": "..." }`). Both fields are required in their respective
+/// variants to avoid ambiguity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(untagged)]
 pub enum ReverseRpcResult {
-    Success {
-        ok: bool,
-    },
-    TextResult {
-        text: String,
-    },
+    /// Boolean acknowledgement (e.g. `cap.user_io.show` response).
+    Success { ok: bool },
+    /// Free-text response (e.g. `cap.user_io.input` result).
+    TextResult { text: String },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanEntry {

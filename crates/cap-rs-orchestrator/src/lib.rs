@@ -26,8 +26,6 @@ pub enum OrchestratorError {
     Worktree(String),
     #[error("driver error: {0}")]
     Driver(#[from] cap_rs::driver::DriverError),
-    #[error("unknown driver kind: {0}")]
-    UnknownDriver(String),
 }
 
 use crate::config::FleetSpec;

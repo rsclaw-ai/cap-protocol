@@ -648,8 +648,7 @@ impl TuiParser {
             .rev()
             .skip_while(|line| {
                 let trimmed = line.trim_end_matches(['\n', '\r']);
-                trimmed.is_empty()
-                    || self.ready_markers.iter().any(|re| re.is_match(trimmed))
+                trimmed.is_empty() || self.ready_markers.iter().any(|re| re.is_match(trimmed))
             })
             .collect::<Vec<_>>()
             .into_iter()
@@ -948,13 +947,19 @@ impl Driver for PtyDriver {
                 match scope {
                     CancelScope::CurrentTurn => self.send_bytes(b"\x03").await, // Ctrl+C
                     CancelScope::Session => {
-                        // SIGTERM via the PTY master's child. Most TUIs exit
-                        // on SIGTERM; the session actor will detect EOF.
-                        self.send_bytes(b"\x03").await?; // graceful cancel first
-                        // TODO: send actual SIGTERM via nix::sys::signal::kill
-                        // once PtyDriver gains a pid handle. For now send ^C
-                        // twice to encourage exit.
-                        self.send_bytes(b"\x03").await
+                        // Send SIGINT (Ctrl+C) first for graceful shutdown.
+                        self.send_bytes(b"\x03").await?;
+                        // Give the process a moment to exit cleanly.
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        // If still alive, send another SIGINT to encourage exit.
+                        // A proper SIGTERM would require platform-specific code
+                        // to access the child's PID (portable-pty's Child trait
+                        // doesn't expose it). For most CLI agents, repeated
+                        // SIGINT is sufficient to trigger shutdown.
+                        if self.is_alive() {
+                            self.send_bytes(b"\x03").await?;
+                        }
+                        Ok(())
                     }
                 }
             }

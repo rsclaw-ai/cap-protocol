@@ -66,13 +66,13 @@ impl<'de> Deserialize<'de> for DriverKind {
             "claude" => DriverKind::Claude,
             "codex" => DriverKind::Codex,
             other => {
-                if let Some(cmd) = other.strip_prefix("grpc:") {
-                    if cmd.is_empty() {
-                        return Err(serde::de::Error::custom(
-                            "invalid grpc address '' — expected host:port",
-                        ));
+                if let Some(addr) = other.strip_prefix("grpc:") {
+                    if !valid_grpc_address(addr) {
+                        return Err(serde::de::Error::custom(format!(
+                            "invalid grpc address '{addr}' — expected host:port (e.g. 'localhost:50051')"
+                        )));
                     }
-                    DriverKind::Grpc(cmd.to_string())
+                    DriverKind::Grpc(addr.to_string())
                 } else if let Some(cmd) = other.strip_prefix("acp:") {
                     if cmd.is_empty() || !valid_binary_name(cmd) {
                         return Err(serde::de::Error::custom(format!(
@@ -233,7 +233,36 @@ fn valid_binary_name(name: &str) -> bool {
         && !name.contains('/')
         && !name.contains('\\')
         && !name.contains(' ')
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+/// Safe gRPC address: `host:port` where host is a valid hostname or IP, and
+/// port is numeric. Rejects paths, schemes, and other URI components to
+/// prevent SSRF and config injection.
+fn valid_grpc_address(addr: &str) -> bool {
+    if addr.is_empty() {
+        return false;
+    }
+    // Reject scheme prefixes (http://, https://, unix:, etc.)
+    if addr.contains("://") || addr.starts_with("unix:") {
+        return false;
+    }
+    // Must have exactly one colon separating host and port.
+    let Some((host, port)) = addr.rsplit_once(':') else {
+        return false;
+    };
+    if host.is_empty() || port.is_empty() {
+        return false;
+    }
+    // Port must be numeric.
+    if !port.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    // Host: alphanumeric, dots, hyphens, underscores, or IPv6 brackets.
+    host.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '[' | ']' | ':'))
 }
 
 /// Safe git ref: non-empty, no `..`, no leading `-`, chars limited to
@@ -661,5 +690,55 @@ fleet:
 "#;
         let spec = FleetSpec::from_yaml(yaml).unwrap();
         assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn parses_grpc_driver_with_valid_address() {
+        let yaml = r#"
+fleet:
+  base_branch: main
+  sessions:
+    agent: { driver: "grpc:localhost:50051" }
+  start: agent
+"#;
+        let spec = FleetSpec::from_yaml(yaml).unwrap();
+        assert_eq!(
+            spec.fleet.sessions["agent"].driver,
+            DriverKind::Grpc("localhost:50051".into())
+        );
+        spec.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_grpc_with_invalid_address() {
+        for bad in [
+            "",
+            "localhost",
+            "http://localhost:50051",
+            "localhost:abc",
+            ":50051",
+        ] {
+            let yaml = format!(
+                "fleet:\n  base_branch: main\n  sessions:\n    a: {{ driver: \"grpc:{bad}\" }}\n  start: a\n"
+            );
+            let result = FleetSpec::from_yaml(&yaml);
+            assert!(result.is_err(), "address '{bad}' should be rejected");
+        }
+    }
+
+    #[test]
+    fn accepts_grpc_with_ip_address() {
+        let yaml = r#"
+fleet:
+  base_branch: main
+  sessions:
+    agent: { driver: "grpc:127.0.0.1:8080" }
+  start: agent
+"#;
+        let spec = FleetSpec::from_yaml(yaml).unwrap();
+        assert_eq!(
+            spec.fleet.sessions["agent"].driver,
+            DriverKind::Grpc("127.0.0.1:8080".into())
+        );
     }
 }

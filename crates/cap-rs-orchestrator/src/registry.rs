@@ -67,8 +67,19 @@ impl SessionRegistry {
 
     /// Drop all inboxes and await every task to finish.
     pub async fn shutdown(&mut self) {
-        let handles: Vec<_> = self.sessions.drain().map(|(_, h)| h).collect();
-        drop(handles);
+        let handles: Vec<SessionHandle> = self.sessions.drain().map(|(_, h)| h).collect();
+        // Separate inboxes (senders) from join handles.
+        let (inboxes, joins): (Vec<_>, Vec<_>) =
+            handles.into_iter().map(|h| (h.inbox, h.join)).unzip();
+        // Drop all senders first so session actors see a closed channel
+        // and exit their recv loops cleanly.
+        drop(inboxes);
+        // Await all tasks to ensure no leaked tokio tasks.
+        for join in joins {
+            if let Err(e) = join.await {
+                tracing::warn!(error = %e, "session task panicked during shutdown");
+            }
+        }
     }
 }
 

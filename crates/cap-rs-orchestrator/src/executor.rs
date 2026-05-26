@@ -6,9 +6,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use cap_rs::core::{AgentEvent, ClientFrame, Content, PermissionDecision, StopReason, TextChannel};
-use tracing::debug;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 
 use crate::OrchestratorError;
 use crate::audit::AuditLog;
@@ -30,12 +30,16 @@ impl ExecutorHandle {
     /// Snapshot the audit log as `(from, to)` pairs in order. Readable even
     /// after the fleet completes — the log is shared, not message-passed.
     pub fn audit_pairs(&self) -> Vec<(SessionId, SessionId)> {
+        use crate::audit::AuditEvent;
         self.audit
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .records()
             .iter()
-            .map(|r| (r.from.clone(), r.to.clone()))
+            .filter_map(|r| match &r.event {
+                AuditEvent::Route { from, to } => Some((from.clone(), to.clone())),
+                _ => None,
+            })
             .collect()
     }
 
@@ -264,10 +268,12 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                         self.buffers.entry(session.clone()).or_default().push_str(text);
                     }
 
-                    let session_failed_id = match &ev {
-                        OrchestratorEvent::SessionFailed { session, .. } => Some(session.clone()),
-                        _ => None,
-                    };
+                    // Record failed sessions BEFORE checking fleet_complete,
+                    // otherwise the completion check won't see the failure and
+                    // the fleet will hang waiting for a session that already died.
+                    if let OrchestratorEvent::SessionFailed { ref session, .. } = ev {
+                        self.failed.insert(session.clone());
+                    }
                     match ev {
                         OrchestratorEvent::SessionDone { session, stop_reason } => {
                             // Don't forward SessionDone before routing — the consumer
@@ -289,22 +295,21 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                             let _ = self.out.send(other).await;
                         }
                     }
-                    if let Some(fail_id) = session_failed_id {
-                        self.failed.insert(fail_id);
-                    }
                 }
             }
         }
 
+        // Ensure all session actors see the cancellation and stop promptly.
+        self.cancel.cancel();
+
         self.registry.shutdown().await;
 
-        // Clean up worktrees only on normal completion (not cancellation),
-        // so the user can inspect session artifacts after Ctrl-C.
-        if !self.cancel.is_cancelled() {
-            for id in self.spawned.drain() {
-                if let Err(e) = self.worktree.cleanup(&id) {
-                    tracing::warn!(session = %id, error = %e, "worktree cleanup failed");
-                }
+        // Always clean up worktrees. On cancellation the user can still inspect
+        // the audit log and event stream; orphaned git worktrees are worse than
+        // losing the filesystem state of a cancelled run.
+        for id in self.spawned.drain() {
+            if let Err(e) = self.worktree.cleanup(&id) {
+                tracing::warn!(session = %id, error = %e, "worktree cleanup failed");
             }
         }
     }
@@ -338,10 +343,7 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
             } => {
                 let _ = self
                     .registry
-                    .route(
-                        &session,
-                        ClientFrame::ReverseRpcResult { rpc_id, result },
-                    )
+                    .route(&session, ClientFrame::ReverseRpcResult { rpc_id, result })
                     .await;
             }
             // v1: selection is informational; the human merges the chosen worktree.
@@ -362,7 +364,6 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
         enum Fire {
             Route(SessionId, ClientFrame),
             Select(Vec<SessionId>),
-            FailLead(String),
         }
 
         let mut fires: Vec<Fire> = Vec::new();
@@ -393,17 +394,18 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                         match parse_subtasks(&buf) {
                             Some(items) if !items.is_empty() => {
                                 for (i, to) in f.to.iter().enumerate() {
-                                    let sub = items[i % items.len()].clone();
+                                    // Guard against more targets than subtasks:
+                                    // stop assigning rather than wrapping around.
+                                    if i >= items.len() {
+                                        routing_failed = true;
+                                        break;
+                                    }
+                                    let sub = items[i].clone();
                                     fires.push(Fire::Route(to.clone(), task_prompt(&sub)));
                                 }
                             }
                             _ => {
                                 routing_failed = true;
-                                fires.push(Fire::FailLead(
-                                    "fan_out by_subtask: lead emitted no parseable \
-                                     cap-subtasks JSON-array block"
-                                        .into(),
-                                ));
                             }
                         }
                     }
@@ -461,11 +463,6 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                         .out
                         .send(OrchestratorEvent::AwaitSelection { candidates })
                         .await;
-                }
-                Fire::FailLead(error) => {
-                    // FailLead is handled above; this arm is unreachable but
-                    // kept for exhaustiveness.
-                    tracing::warn!(%from, error, "unreachable FailLead arm hit");
                 }
             }
         }

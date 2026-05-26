@@ -12,7 +12,9 @@ async fn main() -> anyhow::Result<()> {
 
     driver
         .send(ClientFrame::Prompt {
-            content: vec![Content::text("Say \"hello from Rust gRPC\" and nothing else.")],
+            content: vec![Content::text(
+                "Say \"hello from Rust gRPC\" and nothing else.",
+            )],
         })
         .await?;
 

@@ -37,7 +37,7 @@ stream-json  = ["dep:tokio", "dep:tokio-util", "dep:async-trait", "dep:thiserror
 codex        = ["dep:tokio", "dep:async-trait", "dep:thiserror", "dep:tracing"]
 acp          = ["dep:tokio", "dep:async-trait", "dep:thiserror", "dep:tracing"]
 a2a          = []
-grpc         = ["dep:tokio", "dep:tokio-stream", "dep:async-trait", "dep:thiserror", "dep:tracing", "dep:tonic", "dep:prost"]
+grpc         = ["dep:tokio", "dep:tokio-stream", "dep:async-trait", "dep:thiserror", "dep:tracing", "dep:tonic", "dep:prost", "dep:tonic-build"]
 orchestrator = []
 
 full         = ["pty", "stream-json", "codex", "acp", "a2a", "grpc", "orchestrator"]
@@ -69,7 +69,7 @@ tonic        = { version = "0.12",                       optional = true }
 prost        = { version = "0.13",                       optional = true }
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-build = { version = "0.12", optional = true }
 
 [dev-dependencies]
 anyhow = "1.0.102"

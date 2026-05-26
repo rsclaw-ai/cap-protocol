@@ -44,16 +44,23 @@ async fn cmd_run(path: PathBuf, task: Option<String>, bypass: bool) -> anyhow::R
     let yaml = std::fs::read_to_string(&path)?;
     let mut spec = FleetSpec::from_yaml(&yaml).map_err(|e| anyhow::anyhow!("{e}"))?;
     if bypass {
+        // Interactive confirmation — bypass disables all permission gates.
+        eprintln!(
+            "⚠ --bypass: every agent will run with no permission gate.\n  \
+             Worktree isolation still applies. Continue? [y/N]"
+        );
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        if !matches!(line.trim(), "y" | "Y" | "yes") {
+            eprintln!("Aborted.");
+            std::process::exit(0);
+        }
         // Force fleet-wide bypass: set the fleet default AND clear every
         // per-session override so no `permissions:` in the file can opt out.
         spec.fleet.permissions = PermissionPolicy::Bypass;
         for session in spec.fleet.sessions.values_mut() {
             session.permissions = None;
         }
-        eprintln!(
-            "⚠ bypass: every agent will run unsandboxed with no permission gate \
-             (worktree isolation still applies)."
-        );
     }
     spec.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -61,7 +68,18 @@ async fn cmd_run(path: PathBuf, task: Option<String>, bypass: bool) -> anyhow::R
         .or_else(|| spec.fleet.task.clone())
         .ok_or_else(|| anyhow::anyhow!("no task: pass --task or set fleet.task"))?;
 
-    let repo = std::env::current_dir()?;
+    // Use the fleet.yaml's parent directory as the repo root, so the fleet
+    // operates on its own project regardless of where `cap run` is invoked.
+    let repo = path
+        .parent()
+        .map(|p| {
+            if p.as_os_str().is_empty() {
+                std::env::current_dir().unwrap_or_default()
+            } else {
+                p.to_path_buf()
+            }
+        })
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let (handle, mut events) = cap_rs_orchestrator::run(spec, repo, &effective_task)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -78,6 +96,7 @@ async fn cmd_run(path: PathBuf, task: Option<String>, bypass: bool) -> anyhow::R
 
     let mut stdin = BufReader::new(tokio::io::stdin()).lines();
 
+    let mut saw_fleet_complete = false;
     while let Some(ev) = events.recv().await {
         match ev {
             OrchestratorEvent::SessionStarted { session } => println!("▶ {session} started"),
@@ -114,11 +133,19 @@ async fn cmd_run(path: PathBuf, task: Option<String>, bypass: bool) -> anyhow::R
             }
             OrchestratorEvent::FleetComplete => {
                 println!("== fleet complete ==");
+                saw_fleet_complete = true;
                 break;
             }
             // OrchestratorEvent is #[non_exhaustive]; ignore any future variants.
             _ => {}
         }
+    }
+
+    // If the event stream closed without FleetComplete, the executor task
+    // likely panicked — surface an error rather than silently exiting 0.
+    if !saw_fleet_complete {
+        eprintln!("✗ fleet ended without FleetComplete — executor may have crashed");
+        std::process::exit(1);
     }
     Ok(())
 }

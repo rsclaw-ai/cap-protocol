@@ -235,7 +235,10 @@ async fn pump_turn(
                     return;
                 }
             }
-            AgentEvent::ReverseRpc { ref rpc_id, ref rpc } => {
+            AgentEvent::ReverseRpc {
+                ref rpc_id,
+                ref rpc,
+            } => {
                 let rpc_id = rpc_id.clone();
                 let rpc = rpc.clone();
                 bus_send(
@@ -258,10 +261,7 @@ async fn pump_turn(
                     }
                 };
                 if let Err(e) = driver
-                    .send(ClientFrame::ReverseRpcResult {
-                        rpc_id,
-                        result,
-                    })
+                    .send(ClientFrame::ReverseRpcResult { rpc_id, result })
                     .await
                 {
                     bus_send(

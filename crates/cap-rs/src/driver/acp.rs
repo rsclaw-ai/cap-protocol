@@ -162,12 +162,13 @@ impl Driver for AcpDriver {
                 let outcome = match select_option(&options, decision) {
                     Some(option_id) => json!({ "outcome": "selected", "optionId": option_id }),
                     None => {
-                        let fallback_id = options.as_array()
+                        let fallback_id = options
+                            .as_array()
                             .and_then(|arr| arr.first())
                             .and_then(|o| o.get("optionId").and_then(Value::as_str))
                             .unwrap_or("");
                         json!({ "outcome": "cancelled", "optionId": fallback_id })
-                    },
+                    }
                 };
                 let resp = json!({
                     "jsonrpc": JSONRPC_VERSION,
@@ -664,11 +665,9 @@ fn handle_server_request(
                 Some(v) if v.get("type").and_then(Value::as_str) == Some("boolean") => {
                     AskKind::YesNo
                 }
-                Some(v) if v.get("oneOf").is_some() || v.get("enum").is_some() => {
-                    AskKind::Schema {
-                        schema: form.unwrap_or(Value::Null),
-                    }
-                }
+                Some(v) if v.get("oneOf").is_some() || v.get("enum").is_some() => AskKind::Schema {
+                    schema: form.unwrap_or(Value::Null),
+                },
                 _ => AskKind::FreeText,
             };
             vec![AgentEvent::AskUser {
@@ -978,7 +977,12 @@ mod tests {
         .unwrap();
         let events = process_frame(&frame, &empty_pending(), &empty_perms());
         match &events[0] {
-            AgentEvent::AskUser { ask_id, prompt, ask_kind, .. } => {
+            AgentEvent::AskUser {
+                ask_id,
+                prompt,
+                ask_kind,
+                ..
+            } => {
                 assert_eq!(ask_id, "8");
                 assert_eq!(prompt, "Which DB?");
                 assert!(matches!(ask_kind, AskKind::Schema { .. }));

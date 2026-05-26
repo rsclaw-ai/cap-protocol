@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use cap_rs::core::{
-    AgentEvent, ClientFrame, PermissionScope, RiskLevel, StopReason, TextChannel, Usage,
-    CAP_PROTOCOL_VERSION,
+    AgentEvent, CAP_PROTOCOL_VERSION, ClientFrame, PermissionScope, RiskLevel, StopReason,
+    TextChannel, Usage,
 };
 use cap_rs::driver::{Driver, DriverError};
 

@@ -25,3 +25,7 @@ testing = []
 
 [dev-dependencies]
 anyhow = "1"
+
+[[test]]
+name = "patterns"
+required-features = ["testing"]

@@ -57,7 +57,9 @@ async fn main() -> anyhow::Result<()> {
     let mut last_was_text = false;
     while let Some(event) = driver.next_event().await {
         match event {
-            AgentEvent::Ready { session_id, model, .. } => {
+            AgentEvent::Ready {
+                session_id, model, ..
+            } => {
                 println!(
                     "● ready  session={} model={}",
                     short(&session_id, 8),

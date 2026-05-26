@@ -714,7 +714,12 @@ fn process_frame(
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                return vec![AgentEvent::Error { code, message, retryable: false, details: None }];
+                return vec![AgentEvent::Error {
+                    code,
+                    message,
+                    retryable: false,
+                    details: None,
+                }];
             }
         }
         return Vec::new();

@@ -33,7 +33,13 @@ pub mod grpc;
 // They're gated on `any(stream-json, pty, ...)` because their deps
 // (async-trait, thiserror) come in via those features.
 
-#[cfg(any(feature = "stream-json", feature = "pty", feature = "codex", feature = "acp", feature = "grpc"))]
+#[cfg(any(
+    feature = "stream-json",
+    feature = "pty",
+    feature = "codex",
+    feature = "acp",
+    feature = "grpc"
+))]
 mod common {
     use crate::core::{AgentEvent, ClientFrame};
 
@@ -125,5 +131,11 @@ mod common {
     }
 }
 
-#[cfg(any(feature = "stream-json", feature = "pty", feature = "codex", feature = "acp", feature = "grpc"))]
+#[cfg(any(
+    feature = "stream-json",
+    feature = "pty",
+    feature = "codex",
+    feature = "acp",
+    feature = "grpc"
+))]
 pub use common::{Driver, DriverError, DriverExitStatus};

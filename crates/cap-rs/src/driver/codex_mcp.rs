@@ -297,12 +297,14 @@ impl CodexMcpBuilder {
         tokio::spawn(reader_task(
             stdout,
             reader_tx.clone(),
-            Arc::clone(&thread_id),
-            Arc::clone(&pending),
-            Arc::clone(&streamed_this_turn),
-            Arc::clone(&ready_emitted),
-            self.model.clone(),
-            Arc::clone(&exited),
+            ReaderCtx {
+                thread_id: Arc::clone(&thread_id),
+                pending: Arc::clone(&pending),
+                streamed_this_turn: Arc::clone(&streamed_this_turn),
+                ready_emitted: Arc::clone(&ready_emitted),
+                model: self.model.clone(),
+                exited: Arc::clone(&exited),
+            },
         ));
         tokio::spawn(stderr_drain(stderr));
 
@@ -427,15 +429,20 @@ async fn writer_task(mut stdin: tokio::process::ChildStdin, mut rx: mpsc::Receiv
     }
 }
 
-async fn reader_task(
-    stdout: tokio::process::ChildStdout,
-    tx: mpsc::Sender<AgentEvent>,
+/// Shared state for the codex-mcp reader task and frame processor.
+struct ReaderCtx {
     thread_id: Arc<Mutex<Option<String>>>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResult>>>>,
     streamed_this_turn: Arc<AtomicBool>,
     ready_emitted: Arc<AtomicBool>,
     model: Option<String>,
     exited: Arc<AtomicBool>,
+}
+
+async fn reader_task(
+    stdout: tokio::process::ChildStdout,
+    tx: mpsc::Sender<AgentEvent>,
+    ctx: ReaderCtx,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     loop {
@@ -452,15 +459,22 @@ async fn reader_task(
                         continue;
                     }
                 };
-                for ev in process_frame(&frame, &thread_id, &pending, &streamed_this_turn, &ready_emitted, &model) {
+                for ev in process_frame(
+                    &frame,
+                    &ctx.thread_id,
+                    &ctx.pending,
+                    &ctx.streamed_this_turn,
+                    &ctx.ready_emitted,
+                    &ctx.model,
+                ) {
                     if tx.send(ev).await.is_err() {
-                        exited.store(true, Ordering::Relaxed);
+                        ctx.exited.store(true, Ordering::Relaxed);
                         return;
                     }
                 }
             }
             Ok(None) | Err(_) => {
-                exited.store(true, Ordering::Relaxed);
+                ctx.exited.store(true, Ordering::Relaxed);
                 return;
             }
         }
@@ -777,9 +791,18 @@ mod tests {
         )
         .unwrap();
         let tid = empty_thread();
-        let events = process_frame(&frame, &tid, &empty_pending(), &streamed_flag(), &ready_flag(), &no_model());
+        let events = process_frame(
+            &frame,
+            &tid,
+            &empty_pending(),
+            &streamed_flag(),
+            &ready_flag(),
+            &no_model(),
+        );
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], AgentEvent::Ready { session_id, model, .. } if session_id == "abc" && model.is_none()));
+        assert!(
+            matches!(&events[0], AgentEvent::Ready { session_id, model, .. } if session_id == "abc" && model.is_none())
+        );
         assert_eq!(tid.lock().unwrap().clone(), Some("abc".into()));
     }
 
@@ -790,7 +813,14 @@ mod tests {
                "msg":{"type":"agent_message_content_delta","item_id":"msg_x","delta":"hello"}}}"#,
         )
         .unwrap();
-        let events = process_frame(&frame, &empty_thread(), &empty_pending(), &streamed_flag(), &ready_flag(), &no_model());
+        let events = process_frame(
+            &frame,
+            &empty_thread(),
+            &empty_pending(),
+            &streamed_flag(),
+            &ready_flag(),
+            &no_model(),
+        );
         assert!(matches!(&events[0],
             AgentEvent::TextChunk { text, msg_id, .. } if text == "hello" && msg_id == "msg_x"));
     }
@@ -803,7 +833,14 @@ mod tests {
                "command":["ls","-la"]}}}}"#,
         )
         .unwrap();
-        let events = process_frame(&frame, &empty_thread(), &empty_pending(), &streamed_flag(), &ready_flag(), &no_model());
+        let events = process_frame(
+            &frame,
+            &empty_thread(),
+            &empty_pending(),
+            &streamed_flag(),
+            &ready_flag(),
+            &no_model(),
+        );
         assert!(matches!(&events[0],
             AgentEvent::ToolCallStart { call_id, name, .. } if call_id == "i1" && name == "Bash"));
     }
@@ -816,7 +853,14 @@ mod tests {
                "output":"command not found","status":"failed"}}}}"#,
         )
         .unwrap();
-        let events = process_frame(&frame, &empty_thread(), &empty_pending(), &streamed_flag(), &ready_flag(), &no_model());
+        let events = process_frame(
+            &frame,
+            &empty_thread(),
+            &empty_pending(),
+            &streamed_flag(),
+            &ready_flag(),
+            &no_model(),
+        );
         assert!(matches!(&events[0],
             AgentEvent::ToolCallEnd { call_id, is_error, output }
             if call_id == "i1" && *is_error && output == "command not found"));
@@ -831,7 +875,14 @@ mod tests {
                "content":[{"type":"text","text":"hello"}]}}"#,
         )
         .unwrap();
-        let events = process_frame(&frame, &empty_thread(), &empty_pending(), &streamed_flag(), &ready_flag(), &no_model());
+        let events = process_frame(
+            &frame,
+            &empty_thread(),
+            &empty_pending(),
+            &streamed_flag(),
+            &ready_flag(),
+            &no_model(),
+        );
         assert_eq!(events.len(), 2, "got {events:?}");
         assert!(matches!(&events[0],
             AgentEvent::TextChunk { text, msg_id, .. } if text == "hello" && msg_id == "abc"));
@@ -856,7 +907,14 @@ mod tests {
                "msg":{"type":"agent_message_content_delta","item_id":"m","delta":"hello"}}}"#,
         )
         .unwrap();
-        let evs = process_frame(&delta, &empty_thread(), &empty_pending(), &streamed, &ready_flag(), &no_model());
+        let evs = process_frame(
+            &delta,
+            &empty_thread(),
+            &empty_pending(),
+            &streamed,
+            &ready_flag(),
+            &no_model(),
+        );
         assert!(matches!(&evs[0], AgentEvent::TextChunk { text, .. } if text == "hello"));
         assert!(streamed.load(Ordering::Relaxed), "flag set by delta");
 
@@ -867,7 +925,14 @@ mod tests {
                "structuredContent":{"threadId":"t","content":"hello"}}}"#,
         )
         .unwrap();
-        let evs = process_frame(&resp, &empty_thread(), &empty_pending(), &streamed, &ready_flag(), &no_model());
+        let evs = process_frame(
+            &resp,
+            &empty_thread(),
+            &empty_pending(),
+            &streamed,
+            &ready_flag(),
+            &no_model(),
+        );
         assert_eq!(evs.len(), 1, "got {evs:?}");
         assert!(matches!(&evs[0], AgentEvent::Done { .. }));
         // Flag resets per turn so a future turn can fall through to the fallback.
@@ -883,7 +948,14 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":2,"result":{"protocolVersion":"2024-11-05"}}"#,
         )
         .unwrap();
-        let events = process_frame(&frame, &empty_thread(), &pending, &streamed_flag(), &ready_flag(), &no_model());
+        let events = process_frame(
+            &frame,
+            &empty_thread(),
+            &pending,
+            &streamed_flag(),
+            &ready_flag(),
+            &no_model(),
+        );
         assert!(events.is_empty(), "claimed response yields no event");
         assert!(rx.try_recv().is_ok());
     }
@@ -896,7 +968,15 @@ mod tests {
         )
         .unwrap();
         assert!(
-            process_frame(&frame, &empty_thread(), &empty_pending(), &streamed_flag(), &ready_flag(), &no_model()).is_empty()
+            process_frame(
+                &frame,
+                &empty_thread(),
+                &empty_pending(),
+                &streamed_flag(),
+                &ready_flag(),
+                &no_model()
+            )
+            .is_empty()
         );
     }
 }
