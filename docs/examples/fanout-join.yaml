@@ -1,0 +1,15 @@
+# Fan-out: lead plans, two workers execute in parallel, a reviewer merges.
+fleet:
+  base_branch: main
+  task: "Implement a quicksort algorithm in Rust with tests"
+  sessions:
+    lead:    { driver: claude, permissions: allow }
+    worker1: { driver: codex, permissions: allow }
+    worker2: { driver: acp:opencode, permissions: allow }
+    rev:     { driver: claude, permissions: allow }
+  start: lead
+  routes:
+    - when: lead.done
+      fan_out: { to: [worker1, worker2], split: broadcast }
+    - when: [worker1.done, worker2.done]
+      route_to: rev

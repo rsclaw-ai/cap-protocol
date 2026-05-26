@@ -1,0 +1,12 @@
+# Parallel: two agents work independently on the same task,
+# then a human picks the best result.
+fleet:
+  base_branch: main
+  task: "Write a fast JSON parser in Rust"
+  sessions:
+    a: { driver: claude, permissions: allow }
+    b: { driver: codex, permissions: allow }
+  start: [a, b]
+  routes:
+    - when: [a.done, b.done]
+      collect: human

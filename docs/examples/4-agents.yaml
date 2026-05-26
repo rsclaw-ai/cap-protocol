@@ -1,0 +1,16 @@
+# All 4 agents: claude plans, codex + openclaude work in parallel,
+# opencode reviews. Requires openclaude gRPC server running.
+fleet:
+  base_branch: main
+  task: "Implement a Rust HTTP server with tests"
+  sessions:
+    planner: { driver: claude, permissions: allow }
+    coder1:  { driver: codex, permissions: allow }
+    coder2:  { driver: grpc:localhost:50051, permissions: allow }
+    rev:     { driver: acp:opencode, permissions: allow }
+  start: planner
+  routes:
+    - when: planner.done
+      fan_out: { to: [coder1, coder2], split: broadcast }
+    - when: [coder1.done, coder2.done]
+      route_to: rev

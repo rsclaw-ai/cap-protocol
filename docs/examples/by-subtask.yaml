@@ -1,0 +1,13 @@
+# By-subtask: lead splits work into subtasks, agents pick them up.
+# The lead must output a ```cap-subtasks fence with a JSON array.
+fleet:
+  base_branch: main
+  task: "Build a CLI tool that sorts files by size"
+  sessions:
+    lead:  { driver: claude, permissions: allow }
+    dev1:  { driver: codex, permissions: allow }
+    dev2:  { driver: acp:opencode, permissions: allow }
+  start: lead
+  routes:
+    - when: lead.done
+      fan_out: { to: [dev1, dev2], split: by_subtask }

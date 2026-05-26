@@ -1,0 +1,11 @@
+# Pipeline: one session routes to the next.
+# coder writes code, reviewer checks it.
+fleet:
+  base_branch: main
+  task: "Write a hello world Rust program and compile it"
+  sessions:
+    coder:    { driver: claude, permissions: allow }
+    reviewer: { driver: codex, permissions: allow }
+  start: coder
+  routes:
+    - { when: coder.done, route_to: reviewer }

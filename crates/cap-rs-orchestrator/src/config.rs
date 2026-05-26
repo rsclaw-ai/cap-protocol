@@ -97,6 +97,45 @@ impl<'de> Deserialize<'de> for DriverKind {
     }
 }
 
+/// Return a list of all supported driver kind descriptors (for `cap list-drivers`).
+pub fn list_driver_kinds() -> Vec<&'static str> {
+    vec![
+        "claude       Claude Code CLI (stream-json)",
+        "codex        OpenAI Codex CLI (MCP)",
+        "acp:<cmd>    Any ACP-compatible agent (e.g. acp:opencode)",
+        "grpc:<addr>  OpenClaude gRPC server (e.g. grpc:localhost:50051)",
+        "pty:<cmd>    PTY fallback for any CLI agent (e.g. pty:opencode)",
+    ]
+}
+
+/// Return a default fleet.yaml template string (for `cap init`).
+pub fn default_fleet_yaml() -> String {
+    r#"# CAP fleet configuration — see docs/quickstart.md
+fleet:
+  # Git branch for worktree isolation
+  base_branch: main
+
+  # Default task (override with --task)
+  task: "Write a hello world Rust program and compile it"
+
+  # Permission policy: ask | allow | deny | bypass (default: ask)
+  permissions: ask
+
+  # Define your agent sessions
+  sessions:
+    coder:    { driver: claude, permissions: allow }
+    reviewer: { driver: codex,  permissions: allow }
+
+  # Start here
+  start: coder
+
+  # Route definitions
+  routes:
+    - { when: coder.done, route_to: reviewer }
+"#
+    .to_string()
+}
+
 /// Entry point: one session or several launched at once.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
