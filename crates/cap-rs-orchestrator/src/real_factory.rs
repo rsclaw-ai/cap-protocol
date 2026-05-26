@@ -115,6 +115,12 @@ impl DriverFactory for RealDriverFactory {
             // get a tuned parser (codex's `›`, opencode's `❯`); unknown
             // commands fall back to the generic TUI parser. For codex via PTY
             // we still want bypass to pass the skip-all-prompts flag.
+            DriverKind::Aider => {
+                let driver = PtyDriver::builder("aider")
+                    .cwd(cwd)
+                    .spawn(TuiParser::aider())?;
+                Ok(Box::new(driver))
+            }
             DriverKind::Pty(cmd) => {
                 let mut builder = PtyDriver::builder(cmd.clone()).cwd(cwd);
                 if cmd.as_str() == "codex" && bypass {

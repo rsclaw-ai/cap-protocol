@@ -573,6 +573,16 @@ impl TuiParser {
     /// Generic full-screen TUI fallback for an unknown `pty:<cmd>` agent.
     /// Accepts the usual prompt glyphs. Turn detection is best-effort until a
     /// real marker is captured for the specific agent.
+    /// Tuned for aider chat (https://github.com/paul-gauthier/aider).
+    /// Uses `>` prompt marker and 800 ms idle timeout.
+    pub fn aider() -> Self {
+        Self::custom(
+            "aider",
+            &[r">\s*$", r"❯"],
+            Duration::from_millis(800),
+        )
+    }
+
     pub fn generic() -> Self {
         Self::custom(
             "tui",

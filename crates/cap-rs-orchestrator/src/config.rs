@@ -73,7 +73,7 @@ pub enum PermissionPolicy {
     Bypass,
 }
 
-/// `claude` | `openclaude` | `codex` | `opencode` | `grpc:<addr>` | `acp:<command>` | `pty:<command>`.
+/// `claude` | `openclaude` | `codex` | `opencode` | `aider` | `grpc:<addr>` | `acp:<command>` | `pty:<command>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriverKind {
     Claude,
@@ -82,6 +82,8 @@ pub enum DriverKind {
     /// OpenCode via stream-json (Claude Code-compatible NDJSON frames).
     /// Higher fidelity than ACP: token-level deltas, no handshake overhead.
     OpenCode,
+    /// Aider chat via PTY (https://github.com/paul-gauthier/aider).
+    Aider,
     /// Structured Agent Client Protocol agent (e.g. `acp:opencode`).
     Acp(String),
     /// OpenClaude gRPC server (e.g. `grpc:localhost:50051`).
@@ -98,6 +100,7 @@ impl DriverKind {
             "openclaude" => Some(DriverKind::OpenClaude),
             "codex" => Some(DriverKind::Codex),
             "opencode" => Some(DriverKind::OpenCode),
+            "aider" => Some(DriverKind::Aider),
             _ => s
                 .strip_prefix("grpc:")
                 .map(|addr| DriverKind::Grpc(addr.to_string()))
@@ -121,6 +124,7 @@ impl<'de> Deserialize<'de> for DriverKind {
             "openclaude" => DriverKind::OpenClaude,
             "codex" => DriverKind::Codex,
             "opencode" => DriverKind::OpenCode,
+            "aider" => DriverKind::Aider,
             other => {
                 if let Some(addr) = other.strip_prefix("grpc:") {
                     if !valid_grpc_address(addr) {
@@ -145,7 +149,7 @@ impl<'de> Deserialize<'de> for DriverKind {
                     DriverKind::Pty(cmd.to_string())
                 } else {
                     return Err(serde::de::Error::custom(format!(
-                        "unknown driver kind '{other}' (expected claude | openclaude | codex | opencode | grpc:<host:port> | acp:<cmd> | pty:<cmd>)"
+                        "unknown driver kind '{other}' (expected claude | openclaude | codex | opencode | aider | grpc:<host:port> | acp:<cmd> | pty:<cmd>)"
                     )));
                 }
             }
@@ -160,6 +164,7 @@ pub fn list_driver_kinds() -> Vec<&'static str> {
         "openclaude   OpenClaude CLI (stream-json, Anthropic SDK-compatible)",
         "codex        OpenAI Codex CLI (MCP)",
         "opencode     OpenCode CLI (stream-json, Claude Code-compatible)",
+        "aider        Aider chat via PTY (https://github.com/paul-gauthier/aider)",
         "acp:<cmd>    Any ACP-compatible agent (e.g. acp:opencode)",
         "grpc:<addr>  OpenClaude gRPC server (e.g. grpc:localhost:50051)",
         "pty:<cmd>    PTY fallback for any CLI agent (e.g. pty:opencode)",
