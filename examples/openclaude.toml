@@ -1,0 +1,52 @@
+# CAP agent manifest for openclaude
+[agent]
+name = "openclaude"
+binary = "openclaude"
+version_match = "^0\\."
+profiles = ["coding"]
+
+[probe]
+command = ["openclaude", "--version"]
+version_pattern = "(\\d+\\.\\d+\\.\\d+)"
+
+[startup]
+command = ["openclaude"]
+model_arg = "--model"
+session_id_env = "OPENCLAUDE_SESSION_ID"
+ready_when = { pattern = "> $" }
+init_timeout_seconds = 60
+
+[fast_path]
+stream_json = false
+grpc = true
+acp_stdio = false
+a2a_serve_at = false
+
+[pty]
+cols = 200
+rows = 50
+bracketed_paste = true
+sigint_cancels_turn = "graceful"
+queued_input_supported = true
+
+[parse]
+idle = ["^> $"]
+tool_call_start = "^◉ (?P<tool>\\w+)\\((?P<args>.*?)\\)$"
+error_lines = ["^Error:"]
+
+[capabilities]
+streaming_output = true
+queued_input = true
+mid_turn_cancel = "graceful"
+multi_session = true
+input_modalities = ["text"]
+output_modalities = ["text"]
+
+[capabilities.ask_user]
+yes_no = true
+options = false
+free_text = true
+
+[cost]
+metered = true
+currency = "USD"

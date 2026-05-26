@@ -1,6 +1,7 @@
 //! Declarative `fleet.yaml` schema + validation.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use serde::Deserialize;
 
@@ -310,6 +311,89 @@ impl FleetSpec {
                 Action::Collect(_) => {}
             }
         }
+        self.detect_route_cycles()?;
+        Ok(())
+    }
+
+    /// DFS cycle detection on the route graph. Every edge goes from a trigger
+    /// session to a target session (route_to / fan_out). `collect: human` is
+    /// terminal and creates no edges. A cycle would loop forever at runtime.
+    fn detect_route_cycles(&self) -> Result<(), OrchestratorError> {
+        let ids: Vec<String> = self.fleet.sessions.keys().cloned().collect();
+        let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+        for id in &ids {
+            adj.entry(id.as_str()).or_default();
+        }
+
+        // Build adjacency list from routes. We iterate in two passes so the
+        // borrows of `triggers` / `targets` do not outlive their scope.
+        let edges: Vec<(Vec<String>, Vec<String>)> = self
+            .fleet
+            .routes
+            .iter()
+            .map(|route| {
+                let triggers = route.trigger_sessions();
+                let targets: Vec<String> = match route.action()? {
+                    Action::RouteTo(to) => vec![to],
+                    Action::FanOut(ref f) => f.to.clone(),
+                    Action::Collect(_) => Vec::new(),
+                };
+                Ok::<_, OrchestratorError>((triggers, targets))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (triggers, targets) in &edges {
+            for t in triggers {
+                for target in targets {
+                    adj.entry(t.as_str()).or_default().push(target.as_str());
+                }
+            }
+        }
+
+        enum Color {
+            White,
+            Gray,
+            Black,
+        }
+        let mut color: HashMap<&str, Color> =
+            ids.iter().map(|k| (k.as_str(), Color::White)).collect();
+        let mut path: Vec<&str> = Vec::new();
+
+        fn visit<'a>(
+            node: &'a str,
+            adj: &HashMap<&'a str, Vec<&'a str>>,
+            color: &mut HashMap<&'a str, Color>,
+            path: &mut Vec<&'a str>,
+        ) -> Result<(), OrchestratorError> {
+            match color[node] {
+                Color::Black => return Ok(()),
+                Color::Gray => {
+                    let cycle_start = path.iter().position(|n| *n == node).unwrap();
+                    let cycle: Vec<&str> = path[cycle_start..].to_vec();
+                    return Err(OrchestratorError::Config(format!(
+                        "route cycle detected: {}",
+                        cycle.join(" → ")
+                    )));
+                }
+                Color::White => {}
+            }
+            color.insert(node, Color::Gray);
+            path.push(node);
+            if let Some(neighbors) = adj.get(node) {
+                for neighbor in neighbors {
+                    visit(neighbor, adj, color, path)?;
+                }
+            }
+            path.pop();
+            color.insert(node, Color::Black);
+            Ok(())
+        }
+
+        for node in &ids {
+            if matches!(color[node.as_str()], Color::White) {
+                visit(node.as_str(), &adj, &mut color, &mut path)?;
+            }
+        }
         Ok(())
     }
 }
@@ -477,6 +561,79 @@ fleet:
         let yaml = "fleet:\n  base_branch: \"../../etc\"\n  sessions:\n    a: { driver: claude }\n  start: a\n";
         let spec = FleetSpec::from_yaml(yaml).unwrap();
         assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_self_loop_route() {
+        let yaml = r#"
+fleet:
+  base_branch: main
+  sessions:
+    a: { driver: claude }
+  start: a
+  routes:
+    - { when: a.done, route_to: a }
+"#;
+        let spec = FleetSpec::from_yaml(yaml).unwrap();
+        let err = spec.validate().unwrap_err();
+        assert!(format!("{err}").contains("cycle"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_two_node_cycle() {
+        let yaml = r#"
+fleet:
+  base_branch: main
+  sessions:
+    a: { driver: claude }
+    b: { driver: claude }
+  start: a
+  routes:
+    - { when: a.done, route_to: b }
+    - { when: b.done, route_to: a }
+"#;
+        let spec = FleetSpec::from_yaml(yaml).unwrap();
+        let err = spec.validate().unwrap_err();
+        assert!(format!("{err}").contains("cycle"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_fan_out_cycle() {
+        let yaml = r#"
+fleet:
+  base_branch: main
+  sessions:
+    a: { driver: claude }
+    b: { driver: claude }
+    c: { driver: claude }
+  start: a
+  routes:
+    - when: a.done
+      fan_out: { to: [b, c] }
+    - when: [b.done, c.done]
+      route_to: a
+"#;
+        let spec = FleetSpec::from_yaml(yaml).unwrap();
+        let err = spec.validate().unwrap_err();
+        assert!(format!("{err}").contains("cycle"), "got: {err}");
+    }
+
+    #[test]
+    fn accepts_dag_route() {
+        let yaml = r#"
+fleet:
+  base_branch: main
+  sessions:
+    a: { driver: claude }
+    b: { driver: claude }
+    c: { driver: claude }
+  start: a
+  routes:
+    - { when: a.done, route_to: b }
+    - { when: b.done, route_to: c }
+"#;
+        let spec = FleetSpec::from_yaml(yaml).unwrap();
+        spec.validate().unwrap();
     }
 
     #[test]

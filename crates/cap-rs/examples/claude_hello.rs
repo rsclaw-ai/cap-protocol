@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
     let mut last_was_text = false;
     while let Some(event) = driver.next_event().await {
         match event {
-            AgentEvent::Ready { session_id, model } => {
+            AgentEvent::Ready { session_id, model, .. } => {
                 println!(
                     "● ready  session={} model={}",
                     short(&session_id, 8),
@@ -122,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("         wall: {:?}", started.elapsed());
                 break;
             }
-            AgentEvent::Error { code, message } => {
+            AgentEvent::Error { code, message, .. } => {
                 eprintln!("✗ error  {code}: {message}");
                 break;
             }

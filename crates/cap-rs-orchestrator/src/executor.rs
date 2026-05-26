@@ -288,6 +288,16 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
         }
 
         self.registry.shutdown().await;
+
+        // Clean up worktrees only on normal completion (not cancellation),
+        // so the user can inspect session artifacts after Ctrl-C.
+        if !self.cancel.is_cancelled() {
+            for id in self.spawned.drain() {
+                if let Err(e) = self.worktree.cleanup(&id) {
+                    tracing::warn!(session = %id, error = %e, "worktree cleanup failed");
+                }
+            }
+        }
     }
 
     /// Handle a control message from the consumer (decision / cancel / select).
@@ -312,6 +322,19 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                     .await;
             }
             OrchestratorControl::Cancel => self.cancel.cancel(),
+            OrchestratorControl::ReverseRpcResult {
+                session,
+                rpc_id,
+                result,
+            } => {
+                let _ = self
+                    .registry
+                    .route(
+                        &session,
+                        ClientFrame::ReverseRpcResult { rpc_id, result },
+                    )
+                    .await;
+            }
             // v1: selection is informational; the human merges the chosen worktree.
             OrchestratorControl::Select { .. } => {}
         }

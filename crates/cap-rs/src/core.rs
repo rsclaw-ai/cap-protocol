@@ -63,6 +63,15 @@ pub enum ClientFrame {
         scope: CancelScope,
         reason: Option<String>,
     },
+
+    /// Response to a previously emitted [`AgentEvent::ReverseRpc`].
+    /// Carries the JSON value the Reverse RPC method returned.
+    #[serde(rename = "cap.reverse_rpc.result")]
+    ReverseRpcResult {
+        rpc_id: String,
+        #[serde(flatten)]
+        result: ReverseRpcResult,
+    },
 }
 
 /// Scope of a [`ClientFrame::Cancel`] (spec §7.8).
@@ -155,6 +164,13 @@ impl Content {
 // AgentEvent — what the agent streams back to the client.
 // ---------------------------------------------------------------------------
 
+/// Valid protocol version string used in [`AgentEvent::Ready`].
+pub const CAP_PROTOCOL_VERSION: &str = "cap-protocol/v1";
+
+fn default_version() -> String {
+    CAP_PROTOCOL_VERSION.to_string()
+}
+
 /// A streaming event from the agent. Subset of spec §7.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -164,6 +180,8 @@ pub enum AgentEvent {
     #[serde(rename = "cap.session.ready")]
     Ready {
         session_id: String,
+        #[serde(default = "default_version")]
+        version: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
     },
@@ -228,6 +246,9 @@ pub enum AgentEvent {
         ask_kind: AskKind,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         options: Vec<AskOption>,
+        /// Max seconds to wait for an answer. `None` = no timeout (spec §7.5).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
     },
 
     /// Agent requests permission for a security-sensitive action (spec §7.6).
@@ -265,7 +286,24 @@ pub enum AgentEvent {
 
     /// Non-fatal error during the turn (spec §7.11).
     #[serde(rename = "cap.error")]
-    Error { code: String, message: String },
+    Error {
+        code: String,
+        message: String,
+        #[serde(default)]
+        retryable: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<serde_json::Value>,
+    },
+
+    /// A Reverse RPC call from the agent to the orchestrator (§8).
+    /// The orchestrator MUST respond with [`ClientFrame::ReverseRpcResult`].
+    #[serde(rename = "cap.reverse_rpc")]
+    ReverseRpc {
+        /// Unique identifier for matching the response.
+        rpc_id: String,
+        #[serde(flatten)]
+        rpc: ReverseRpc,
+    },
 }
 
 /// Channel hint for [`AgentEvent::TextChunk`] — spec §7.1.
@@ -278,7 +316,48 @@ pub enum TextChannel {
     System,
 }
 
-/// Plan entry from spec §7.3.
+/// Spec §8 Reverse RPC — a method the agent invokes against the orchestrator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(tag = "method", rename_all = "snake_case")]
+pub enum ReverseRpc {
+    /// Show a notification to the human user (§8.1 `cap.user_io.show`).
+    #[serde(rename = "cap.user_io.show")]
+    UserIoShow {
+        title: String,
+        body: String,
+        /// "info" | "warn" | "error"
+        level: String,
+    },
+    /// Request free-form text input from the user (§8.2 `cap.user_io.input`).
+    #[serde(rename = "cap.user_io.input")]
+    UserIoInput {
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<String>,
+    },
+    /// Emit a notification that bypasses the chat stream (§8.3 `cap.notify`).
+    #[serde(rename = "cap.notify")]
+    Notify {
+        title: String,
+        body: String,
+        #[serde(default)]
+        urgent: bool,
+    },
+}
+
+/// Result of a handled Reverse RPC call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(untagged)]
+pub enum ReverseRpcResult {
+    Success {
+        ok: bool,
+    },
+    TextResult {
+        text: String,
+    },
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanEntry {
     pub id: String,
@@ -286,6 +365,10 @@ pub struct PlanEntry {
     pub status: PlanStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<PlanPriority>,
+    /// Opaque key-value metadata per spec §7.0. Carries `assigned_to` and
+    /// `depends_on` for multi-agent orchestration (§10.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub _meta: Option<std::collections::BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -598,6 +681,7 @@ mod tests {
                 schema: serde_json::json!({"type": "string"}),
             },
             options: vec![],
+            timeout_seconds: None,
         };
         let j = serde_json::to_value(&ev).unwrap();
         assert_eq!(json_kind(&j), "cap.ask_user");

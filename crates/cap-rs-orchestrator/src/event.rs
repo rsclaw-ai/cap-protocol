@@ -1,7 +1,7 @@
 //! Types crossing the engine↔consumer boundary. This boundary is an in-process
 //! `mpsc` channel today and the seam for the future remote (WebSocket) layer.
 
-use cap_rs::core::{AgentEvent, RiskLevel, StopReason};
+use cap_rs::core::{AgentEvent, ReverseRpc, RiskLevel, StopReason};
 
 use crate::config::SessionId;
 
@@ -23,6 +23,12 @@ pub enum OrchestratorEvent {
         req_id: String,
         tool: String,
         risk_level: RiskLevel,
+    },
+    /// A Reverse RPC call from the agent to the orchestrator (§8).
+    ReverseRpc {
+        session: SessionId,
+        rpc_id: String,
+        rpc: ReverseRpc,
     },
     /// The engine routed one session's output into another's inbox.
     Routed {
@@ -53,6 +59,12 @@ pub enum OrchestratorControl {
         session: SessionId,
         req_id: String,
         allow: bool,
+    },
+    /// Answer to an [`OrchestratorEvent::ReverseRpc`].
+    ReverseRpcResult {
+        session: SessionId,
+        rpc_id: String,
+        result: cap_rs::core::ReverseRpcResult,
     },
     /// Answer to an [`OrchestratorEvent::AwaitSelection`].
     Select { session: SessionId },

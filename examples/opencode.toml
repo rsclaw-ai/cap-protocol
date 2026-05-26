@@ -1,0 +1,50 @@
+# CAP agent manifest for opencode
+[agent]
+name = "opencode"
+binary = "opencode"
+version_match = "^1\\."
+profiles = ["coding"]
+
+[probe]
+command = ["opencode", "--version"]
+version_pattern = "(\\d+\\.\\d+\\.\\d+)"
+
+[startup]
+command = ["opencode"]
+session_id_env = "OPENCODE_SESSION_ID"
+ready_when = { pattern = "\\❯" }
+init_timeout_seconds = 60
+
+[fast_path]
+stream_json = false
+grpc = false
+acp_stdio = false
+a2a_serve_at = false
+
+[pty]
+cols = 200
+rows = 50
+bracketed_paste = true
+sigint_cancels_turn = "graceful"
+queued_input_supported = true
+
+[parse]
+idle = ["^❯ $", "^› $"]
+error_lines = ["^Error:"]
+
+[capabilities]
+streaming_output = true
+queued_input = true
+mid_turn_cancel = "graceful"
+multi_session = true
+input_modalities = ["text"]
+output_modalities = ["text"]
+
+[capabilities.ask_user]
+yes_no = false
+options = false
+free_text = true
+
+[cost]
+metered = true
+currency = "USD"

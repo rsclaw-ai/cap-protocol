@@ -44,8 +44,8 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, trace, warn};
 
 use crate::core::{
-    AgentEvent, ClientFrame, Content, PermissionDecision, PermissionScope, RiskLevel, StopReason,
-    TextChannel, Usage,
+    AgentEvent, AskKind, ClientFrame, Content, PermissionDecision, PermissionScope, RiskLevel,
+    StopReason, TextChannel, Usage,
 };
 use crate::driver::{Driver, DriverError, DriverExitStatus};
 
@@ -182,6 +182,11 @@ impl Driver for AcpDriver {
             ClientFrame::AskUserAnswer { .. } => Err(DriverError::AgentError {
                 code: "cap_acp_askuser_unsupported".into(),
                 message: "ACP surfaces decisions as permission requests, not free-form asks".into(),
+            }),
+
+            ClientFrame::ReverseRpcResult { .. } => Err(DriverError::AgentError {
+                code: "cap_reverse_rpc_unsupported".into(),
+                message: "ACP driver does not emit reverse RPC".into(),
             }),
         }
     }
@@ -330,6 +335,7 @@ impl AcpBuilder {
         let _ = reader_tx
             .send(AgentEvent::Ready {
                 session_id: sid,
+                version: crate::core::CAP_PROTOCOL_VERSION.into(),
                 model,
             })
             .await;
@@ -593,6 +599,8 @@ fn handle_response(
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
+            retryable: false,
+            details: None,
         }];
     }
     let res = frame.get("result").cloned().unwrap_or(Value::Null);
@@ -641,6 +649,34 @@ fn handle_server_request(
                 intent: tool_call,
                 scope: PermissionScope::Execute,
                 risk_level: RiskLevel::Medium,
+            }]
+        }
+        "session/elicit" => {
+            // ACP elicitation carries the prompt under `question` or `prompt`.
+            let prompt = params
+                .get("question")
+                .or_else(|| params.get("prompt"))
+                .and_then(Value::as_str)
+                .unwrap_or("agent requests input")
+                .to_string();
+            let form = params.get("form").cloned();
+            let ask_kind = match &form {
+                Some(v) if v.get("type").and_then(Value::as_str) == Some("boolean") => {
+                    AskKind::YesNo
+                }
+                Some(v) if v.get("oneOf").is_some() || v.get("enum").is_some() => {
+                    AskKind::Schema {
+                        schema: form.unwrap_or(Value::Null),
+                    }
+                }
+                _ => AskKind::FreeText,
+            };
+            vec![AgentEvent::AskUser {
+                ask_id: req_id,
+                prompt,
+                ask_kind,
+                options: vec![],
+                timeout_seconds: None,
             }]
         }
         // We advertised no fs/terminal capability, so the agent should never
@@ -808,6 +844,7 @@ fn parse_plan_entries(entries: &Value) -> Vec<crate::core::PlanEntry> {
                 _ => PlanStatus::Pending,
             },
             priority: None,
+            _meta: None,
         })
         .collect()
 }
@@ -928,5 +965,25 @@ mod tests {
         )
         .unwrap();
         assert!(process_frame(&frame, &empty_pending(), &empty_perms()).is_empty());
+    }
+
+    #[test]
+    fn session_elicit_becomes_ask_user() {
+        let frame: Value = serde_json::from_str(
+            r#"{"jsonrpc":"2.0","id":8,"method":"session/elicit","params":{
+               "sessionId":"s","question":"Which DB?",
+               "form":{"type":"string","oneOf":[{"const":"pg","title":"PostgreSQL"},
+                                                 {"const":"sqlite","title":"SQLite"}]}}}"#,
+        )
+        .unwrap();
+        let events = process_frame(&frame, &empty_pending(), &empty_perms());
+        match &events[0] {
+            AgentEvent::AskUser { ask_id, prompt, ask_kind, .. } => {
+                assert_eq!(ask_id, "8");
+                assert_eq!(prompt, "Which DB?");
+                assert!(matches!(ask_kind, AskKind::Schema { .. }));
+            }
+            other => panic!("expected AskUser, got: {other:?}"),
+        }
     }
 }

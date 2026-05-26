@@ -1,0 +1,51 @@
+# CAP agent manifest for codex
+[agent]
+name = "codex"
+binary = "codex"
+version_match = "^0\\."
+profiles = ["coding"]
+
+[probe]
+command = ["codex", "--version"]
+version_pattern = "(\\d+\\.\\d+\\.\\d+)"
+
+[startup]
+command = ["codex"]
+model_arg = "--model"
+ready_when = { pattern = "\\›" }
+init_timeout_seconds = 120
+
+[fast_path]
+stream_json = false
+grpc = false
+acp_stdio = false
+a2a_serve_at = false
+
+[pty]
+cols = 200
+rows = 50
+bracketed_paste = true
+sigint_cancels_turn = "graceful"
+queued_input_supported = true
+
+[parse]
+idle = ["^\\› $"]
+thought_section = "^_thinking_\\b"
+error_lines = ["^✗ "]
+
+[capabilities]
+streaming_output = true
+queued_input = true
+mid_turn_cancel = "graceful"
+multi_session = true
+input_modalities = ["text"]
+output_modalities = ["text"]
+
+[capabilities.ask_user]
+yes_no = true
+options = false
+free_text = true
+
+[cost]
+metered = true
+currency = "USD"

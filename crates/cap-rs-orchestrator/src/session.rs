@@ -1,7 +1,7 @@
 //! One tokio task per session, owning a `Box<dyn Driver>`. Communicates only
 //! over channels — no shared mutable state, no `Mutex<Driver>`.
 
-use cap_rs::core::{AgentEvent, ClientFrame, PermissionDecision};
+use cap_rs::core::{AgentEvent, ClientFrame, PermissionDecision, ReverseRpcResult};
 use cap_rs::driver::Driver;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -229,6 +229,47 @@ async fn pump_turn(
 
                 if let Err(e) = driver
                     .send(ClientFrame::PermissionResponse { req_id, decision })
+                    .await
+                {
+                    bus_send(
+                        bus,
+                        OrchestratorEvent::SessionFailed {
+                            session: id.clone(),
+                            error: e.to_string(),
+                        },
+                        cancel,
+                    )
+                    .await;
+                    return TurnResult::Stop;
+                }
+            }
+            AgentEvent::ReverseRpc { ref rpc_id, ref rpc } => {
+                let rpc_id = rpc_id.clone();
+                let rpc = rpc.clone();
+                bus_send(
+                    bus,
+                    OrchestratorEvent::ReverseRpc {
+                        session: id.clone(),
+                        rpc_id: rpc_id.clone(),
+                        rpc,
+                    },
+                    cancel,
+                )
+                .await;
+                // Wait for the consumer to respond.
+                let result = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => { let _ = driver.shutdown().await; return TurnResult::Stop; }
+                    maybe = inbox_rx.recv() => match maybe {
+                        Some(ClientFrame::ReverseRpcResult { result, .. }) => result,
+                        _ => ReverseRpcResult::Success { ok: false },
+                    }
+                };
+                if let Err(e) = driver
+                    .send(ClientFrame::ReverseRpcResult {
+                        rpc_id,
+                        result,
+                    })
                     .await
                 {
                     bus_send(

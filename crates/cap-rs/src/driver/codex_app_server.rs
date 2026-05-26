@@ -246,6 +246,10 @@ impl Driver for CodexAppServerDriver {
                     .map_err(|_| DriverError::AgentExited)?;
                 Ok(())
             }
+            ClientFrame::ReverseRpcResult { .. } => Err(DriverError::AgentError {
+                code: "cap_reverse_rpc_unsupported".into(),
+                message: "codex app-server driver does not emit reverse RPC".into(),
+            }),
         }
     }
 
@@ -471,6 +475,7 @@ impl CodexAppServerBuilder {
         let _ = reader_tx
             .send(AgentEvent::Ready {
                 session_id: thread_id_value,
+                version: crate::core::CAP_PROTOCOL_VERSION.into(),
                 model,
             })
             .await;
@@ -709,7 +714,7 @@ fn process_frame(
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                return vec![AgentEvent::Error { code, message }];
+                return vec![AgentEvent::Error { code, message, retryable: false, details: None }];
             }
         }
         return Vec::new();
@@ -814,6 +819,7 @@ fn handle_server_request(
                 prompt,
                 ask_kind,
                 options: Vec::new(),
+                timeout_seconds: None,
             }]
         }
         other => {
@@ -1023,6 +1029,8 @@ fn parse_notification(
                 events.push(AgentEvent::Error {
                     code: "codex_turn_failed".into(),
                     message,
+                    retryable: false,
+                    details: None,
                 });
             }
             events.push(AgentEvent::Done {
@@ -1071,6 +1079,8 @@ fn parse_notification(
             vec![AgentEvent::Error {
                 code,
                 message: full_message,
+                retryable: false,
+                details: None,
             }]
         }
 
@@ -1113,6 +1123,7 @@ fn parse_plan_entries(plan: &Value) -> Vec<crate::core::PlanEntry> {
                 content: text,
                 status,
                 priority: None,
+                _meta: None,
             }
         })
         .collect()
@@ -1335,7 +1346,7 @@ mod tests {
             &mut ds,
         );
         match &events[0] {
-            AgentEvent::Error { code, message } => {
+            AgentEvent::Error { code, message, .. } => {
                 assert_eq!(code, "codex_rate_limit");
                 assert!(message.contains("rate limit hit"));
                 assert!(message.contains("retry in 5s"));
@@ -1362,7 +1373,7 @@ mod tests {
             &mut ds,
         );
         match &events[0] {
-            AgentEvent::Error { code, message } => {
+            AgentEvent::Error { code, message, .. } => {
                 assert_eq!(code, "codex_jsonrpc_-32602");
                 assert_eq!(message, "invalid input");
             }

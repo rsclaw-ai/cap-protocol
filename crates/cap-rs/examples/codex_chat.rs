@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
             event = driver.next_event() => {
                 let Some(event) = event else { break };
                 match event {
-                    AgentEvent::Ready { session_id, model } => {
+                    AgentEvent::Ready { session_id, model, .. } => {
                         eprintln!("● ready  session={} model={}",
                                   short(&session_id, 8),
                                   model.as_deref().unwrap_or("?"));
@@ -137,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
                             std::io::stderr().flush().ok();
                         }
                     }
-                    AgentEvent::Error { code, message } => {
+                    AgentEvent::Error { code, message, .. } => {
                         eprintln!("\n✗ {code}: {message}");
                     }
                     _ => {}

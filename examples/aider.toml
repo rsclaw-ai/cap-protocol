@@ -1,0 +1,51 @@
+# CAP agent manifest for aider
+[agent]
+name = "aider"
+binary = "aider"
+version_match = "^0\\."
+profiles = ["coding"]
+
+[probe]
+command = ["aider", "--version"]
+version_pattern = "(\\d+\\.\\d+\\.\\d+)"
+
+[startup]
+command = ["aider", "--no-auto-commits", "--no-suggest-shell-commands"]
+model_arg = "--model"
+ready_when = { pattern = "^>" }
+init_timeout_seconds = 90
+
+[fast_path]
+stream_json = false
+grpc = false
+acp_stdio = false
+a2a_serve_at = false
+
+[pty]
+cols = 200
+rows = 50
+bracketed_paste = true
+sigint_cancels_turn = "graceful"
+queued_input_supported = true
+
+[parse]
+idle = ["^>$"]
+tool_call_start = "^/run (?P<tool>\\w+)"
+error_lines = ["^Error:"]
+
+[capabilities]
+streaming_output = true
+queued_input = true
+mid_turn_cancel = "graceful"
+multi_session = false
+input_modalities = ["text"]
+output_modalities = ["text"]
+
+[capabilities.ask_user]
+yes_no = false
+options = false
+free_text = true
+
+[cost]
+metered = false
+currency = "USD"

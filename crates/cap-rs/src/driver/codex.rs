@@ -360,6 +360,7 @@ async fn parse_codex_frame(
             *thread_id.lock().await = Some(tid.clone());
             vec![AgentEvent::Ready {
                 session_id: tid,
+                version: crate::core::CAP_PROTOCOL_VERSION.into(),
                 model: None,
             }]
         }
@@ -384,6 +385,8 @@ async fn parse_codex_frame(
                 AgentEvent::Error {
                     code: "codex_turn_failed".into(),
                     message: msg,
+                    retryable: false,
+                    details: None,
                 },
                 AgentEvent::Done {
                     stop_reason: StopReason::Error,
@@ -401,6 +404,8 @@ async fn parse_codex_frame(
             vec![AgentEvent::Error {
                 code: "codex_error".into(),
                 message: msg,
+                retryable: false,
+                details: None,
             }]
         }
 
@@ -556,6 +561,8 @@ async fn parse_codex_frame(
                     vec![AgentEvent::Error {
                         code: "codex_item_error".into(),
                         message: msg,
+                        retryable: false,
+                        details: None,
                     }]
                 }
 
@@ -583,7 +590,7 @@ async fn parse_codex_frame(
 }
 
 fn codex_todo_to_plan_entry(idx: usize, entry: &Value) -> crate::core::PlanEntry {
-    use crate::core::{PlanEntry, PlanPriority, PlanStatus};
+    use crate::core::{PlanEntry, PlanStatus};
     let text = entry
         .get("text")
         .or_else(|| entry.get("content"))
@@ -605,7 +612,8 @@ fn codex_todo_to_plan_entry(idx: usize, entry: &Value) -> crate::core::PlanEntry
             .unwrap_or_else(|| format!("t{idx}")),
         content: text,
         status,
-        priority: Some(PlanPriority::Medium),
+        priority: None,
+        _meta: None,
     }
 }
 

@@ -385,6 +385,31 @@ Event is a DataPart with `_meta.cap.kind` set to the kind below. In
 other bindings, each Event is a JSON object with a top-level `kind`
 field.
 
+### 7.0.0 `cap.session.ready`
+
+Emitted by the Driver after the Agent process has started and reached its
+`ready_when` condition (the first `Ready` marker from the PTY or a
+binding-specific initialized signal). The Orchestrator MUST NOT send
+prompts before receiving this event.
+
+```jsonc
+{
+  "kind": "cap.session.ready",
+  "version": "cap-protocol/v1",
+  "session_id": "sess_01"         // OPTIONAL — assigned by the Driver
+}
+```
+
+`session_id` is a Driver-local identifier for the spawned session. It
+MAY be used in ACP-style `session/update` frames if the binding supports
+them. Orchestrators that need a stable identity should set
+`session_id_env` in the Manifest and read the Agent's chosen id from its
+environment.
+
+This event is the REQUIRED first event from Driver → Orchestrator at
+session start (§9). It is not preceded by any `cap.text_chunk` or other
+content events.
+
 ### 7.0 `_meta` object
 
 Every Core Event MAY carry a top-level `_meta` object containing

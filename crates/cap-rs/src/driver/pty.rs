@@ -21,7 +21,7 @@ use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::mpsc;
 use tracing::{debug, trace, warn};
 
-use crate::core::{AgentEvent, ClientFrame, Content, StopReason, TextChannel, Usage};
+use crate::core::{AgentEvent, CancelScope, ClientFrame, Content, StopReason, TextChannel, Usage};
 use crate::driver::{Driver, DriverError, DriverExitStatus};
 
 // ---------------------------------------------------------------------------
@@ -335,6 +335,7 @@ impl ReplParser {
                     self.seen_first_prompt = true;
                     events.push(AgentEvent::Ready {
                         session_id: format!("{}-pid{}", self.name, std::process::id()),
+                        version: crate::core::CAP_PROTOCOL_VERSION.into(),
                         model: None,
                     });
                 }
@@ -347,6 +348,7 @@ impl ReplParser {
                         prompt: trimmed.to_string(),
                         ask_kind: crate::core::AskKind::YesNo,
                         options: Vec::new(),
+                        timeout_seconds: None,
                     });
                     return events;
                 }
@@ -416,6 +418,7 @@ impl AgentParser for ReplParser {
                     self.seen_first_prompt = true;
                     events.push(AgentEvent::Ready {
                         session_id: format!("{}-pid{}", self.name, std::process::id()),
+                        version: crate::core::CAP_PROTOCOL_VERSION.into(),
                         model: None,
                     });
                 }
@@ -429,6 +432,7 @@ impl AgentParser for ReplParser {
                     prompt: trimmed.to_string(),
                     ask_kind: crate::core::AskKind::YesNo,
                     options: Vec::new(),
+                    timeout_seconds: None,
                 });
                 consumed += line.len();
                 continue;
@@ -697,6 +701,7 @@ impl AgentParser for TuiParser {
                 self.seen_first_ready = true;
                 return vec![AgentEvent::Ready {
                     session_id: format!("{}-pid{}", self.name, std::process::id()),
+                    version: crate::core::CAP_PROTOCOL_VERSION.into(),
                     model: None,
                 }];
             }
@@ -899,12 +904,19 @@ impl Driver for PtyDriver {
                 }
                 Ok(())
             }
-            ClientFrame::Cancel { .. } => {
-                // Ctrl+C — gracefully cancel current turn for most TUI agents.
-                // Scope `Session` would warrant SIGTERM via the master PTY,
-                // but spec leaves the choice to the binding; we send ETX for
-                // both today.
-                self.send_bytes(b"\x03").await
+            ClientFrame::Cancel { scope, .. } => {
+                match scope {
+                    CancelScope::CurrentTurn => self.send_bytes(b"\x03").await, // Ctrl+C
+                    CancelScope::Session => {
+                        // SIGTERM via the PTY master's child. Most TUIs exit
+                        // on SIGTERM; the session actor will detect EOF.
+                        self.send_bytes(b"\x03").await?; // graceful cancel first
+                        // TODO: send actual SIGTERM via nix::sys::signal::kill
+                        // once PtyDriver gains a pid handle. For now send ^C
+                        // twice to encourage exit.
+                        self.send_bytes(b"\x03").await
+                    }
+                }
             }
             ClientFrame::SessionConfig(_) => {
                 // PTY agents take config via spawn-time argv/env. An inline
@@ -932,6 +944,10 @@ impl Driver for PtyDriver {
                 };
                 self.send_bytes(key).await
             }
+            ClientFrame::ReverseRpcResult { .. } => Err(DriverError::AgentError {
+                code: "cap_reverse_rpc_unsupported".into(),
+                message: "PTY driver does not emit reverse RPC".into(),
+            }),
         }
     }
 

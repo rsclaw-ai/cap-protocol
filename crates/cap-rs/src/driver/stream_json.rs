@@ -496,6 +496,10 @@ fn encode_client_frame(frame: &ClientFrame) -> Result<String, DriverError> {
             })
             .to_string())
         }
+        ClientFrame::ReverseRpcResult { .. } => Err(DriverError::AgentError {
+            code: "cap_reverse_rpc_unsupported".into(),
+            message: "stream-json driver does not emit reverse RPC".into(),
+        }),
     }
 }
 
@@ -510,6 +514,7 @@ fn parse_stream_frame(frame: &Value) -> Vec<AgentEvent> {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
+                version: crate::core::CAP_PROTOCOL_VERSION.into(),
                 model: frame.get("model").and_then(Value::as_str).map(String::from),
             }],
             _ => vec![],

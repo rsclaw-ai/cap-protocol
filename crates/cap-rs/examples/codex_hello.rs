@@ -122,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 break;
             }
-            AgentEvent::Error { code, message } => {
+            AgentEvent::Error { code, message, .. } => {
                 eprintln!("✗ error  {code}: {message}");
             }
             other => {

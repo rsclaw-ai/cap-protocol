@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
             }
             ev = driver.next_event() => {
                 match ev {
-                    Some(AgentEvent::Ready { session_id, model }) => {
+                    Some(AgentEvent::Ready { session_id, model, .. }) => {
                         eprintln!("· Ready session={} model={}", session_id, model.as_deref().unwrap_or("?"));
                     }
                     Some(other) => {

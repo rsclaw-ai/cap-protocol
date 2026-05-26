@@ -1,0 +1,57 @@
+# CAP agent manifest for claude-code
+[agent]
+name = "claude-code"
+binary = "claude"
+version_match = "^2\\."
+profiles = ["coding"]
+
+[probe]
+command = ["claude", "--version"]
+version_pattern = "claude-code/(\\d+\\.\\d+)"
+
+[startup]
+command = ["claude"]
+model_arg = "--model"
+session_id_env = "CLAUDE_SESSION_ID"
+ready_when = { pattern = "Try \"how do I\\?\"" }
+init_timeout_seconds = 60
+
+[fast_path]
+stream_json = ["claude", "-p", "--input-format=stream-json", "--output-format=stream-json"]
+grpc = false
+acp_stdio = false
+a2a_serve_at = false
+
+[pty]
+cols = 200
+rows = 50
+bracketed_paste = true
+sigint_cancels_turn = "graceful"
+queued_input_supported = true
+
+[parse]
+idle = ["^> $", "^❯ $"]
+tool_call_start = "^◉ (?P<tool>\\w+)\\((?P<args>.*?)\\)$"
+tool_call_end   = "^◉ (?P<tool>\\w+) (?P<status>completed|failed)$"
+plan_section    = "^## Plan\\b"
+thought_section = "^_thinking_\\b"
+ask_yes_no      = "Do you want me to continue\\? \\(y/n\\)$"
+ask_options     = "^\\? Select: "
+error_lines     = ["rate_limit_error", "auth_error", "Please run /login"]
+
+[capabilities]
+streaming_output = true
+queued_input = true
+mid_turn_cancel = "graceful"
+multi_session = true
+input_modalities = ["text"]
+output_modalities = ["text"]
+
+[capabilities.ask_user]
+yes_no = true
+options = false
+free_text = true
+
+[cost]
+metered = true
+currency = "USD"

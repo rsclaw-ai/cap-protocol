@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use cap_rs::core::{
     AgentEvent, ClientFrame, PermissionScope, RiskLevel, StopReason, TextChannel, Usage,
+    CAP_PROTOCOL_VERSION,
 };
 use cap_rs::driver::{Driver, DriverError};
 
@@ -47,6 +48,7 @@ impl StubDriver {
     pub fn ready(mut self) -> Self {
         self.queue.push_back(AgentEvent::Ready {
             session_id: format!("{}-sess", self.name),
+            version: CAP_PROTOCOL_VERSION.into(),
             model: None,
         });
         self

@@ -168,7 +168,9 @@ impl Driver for CodexMcpDriver {
                     .map_err(|_| DriverError::AgentExited)
             }
 
-            ClientFrame::PermissionResponse { .. } | ClientFrame::AskUserAnswer { .. } => {
+            ClientFrame::PermissionResponse { .. }
+            | ClientFrame::AskUserAnswer { .. }
+            | ClientFrame::ReverseRpcResult { .. } => {
                 // codex MCP runs autonomously per approval-policy/sandbox; it
                 // does not surface mid-turn approval requests back to the
                 // client today, so these frames have no transport.
@@ -558,6 +560,8 @@ fn handle_response(
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
+            retryable: false,
+            details: None,
         }];
     }
 
@@ -612,6 +616,7 @@ fn handle_codex_event(
                 if !ready_emitted.swap(true, Ordering::Relaxed) {
                     return vec![AgentEvent::Ready {
                         session_id: tid.to_string(),
+                        version: crate::core::CAP_PROTOCOL_VERSION.into(),
                         model: model.clone(),
                     }];
                 }
@@ -774,7 +779,7 @@ mod tests {
         let tid = empty_thread();
         let events = process_frame(&frame, &tid, &empty_pending(), &streamed_flag(), &ready_flag(), &no_model());
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], AgentEvent::Ready { session_id, model } if session_id == "abc" && model.is_none()));
+        assert!(matches!(&events[0], AgentEvent::Ready { session_id, model, .. } if session_id == "abc" && model.is_none()));
         assert_eq!(tid.lock().unwrap().clone(), Some("abc".into()));
     }
 

@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             event = driver.next_event() => {
                 match event {
-                    Some(AgentEvent::Ready { session_id: sid, model }) => {
+                    Some(AgentEvent::Ready { session_id: sid, model, .. }) => {
                         session_id = sid.clone();
                         eprintln!("\n● ready session={} model={}",
                             short(&sid, 8),
@@ -147,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
                             print_prompt(turn);
                         }
                     }
-                    Some(AgentEvent::Error { code, message }) => {
+                    Some(AgentEvent::Error { code, message, .. }) => {
                         eprintln!("\n✗ {code}: {message}");
                     }
                     Some(other) => {

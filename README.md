@@ -77,7 +77,7 @@ cap-protocol/
 │                                        cap-rs-orchestrator are reserved on
 │                                        crates.io at v0.0.0 for possible
 │                                        future split — see crates/cap-rs/README.md)
-├── examples/                           Reference manifests (planned)
+├── examples/                           Reference manifests
 │   ├── claude-code.toml
 │   ├── aider.toml
 │   ├── codex.toml
@@ -94,14 +94,16 @@ the implementation makes it real for v2.
 
 ## Status
 
-**Current**: `draft-2026-05-18` · v1 · public review
+**Current**: `draft-2026-05-25` · v1 · public review
 
 | Milestone | Target | Status |
 |---|---|---|
 | v1 draft published | 2026-05-18 | ✅ done |
 | Public review window | ~6 weeks | 🟡 open |
-| Reference impl: PTY driver + Claude Code manifest | 2026-06 | 🟡 in progress |
-| Reference impl: Multi-agent orchestrator demo | 2026-07 | ⚪ planned |
+| Reference impl: PTY driver + Claude Code manifest | 2026-06 | ✅ done |
+| Reference impl: Multi-agent orchestrator via `fleet.yaml` | 2026-06 | ✅ done |
+| Remote transport: Tailscale + push-based approval | 2026-07 | 🟡 in progress |
+| Mobile approval app | 2026-Q3 | ⚪ planned |
 | First non-rsclaw implementation | when it happens | ⚪ |
 | Stable v1 (no breaking changes for 6 months) | 2026-Q4 | ⚪ |
 | Linux Foundation proposal (if applicable) | when criteria met | ⚪ |

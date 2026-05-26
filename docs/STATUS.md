@@ -74,21 +74,23 @@ engine: runs N collaborating CLI agents in one process from a declarative
   reached `== fleet complete ==`. `claude → claude` also clean.
 - **PTY follow-ups (non-blocking; only relevant for `pty:<cmd>` fallback now):** boundary
   `TextChunk` is the full screen incl. TUI chrome (assistant-message extraction not
-  done); worktree `cleanup()` still unwired (re-runs need manual `git worktree remove` +
-  branch delete).
-- **Test gate:** `cargo test --all-features` = cap-rs 53 + orchestrator 21 unit + 6
+  done).
+- **Test gate:** `cargo test --all-features` = cap-rs 53 + orchestrator 25 unit + 6
   integration + 2 doctest, all green; clippy `-D warnings`, fmt, doc all clean.
-  (cap-rs +8 = codex MCP frame-parsing tests grounded in real `codex mcp-server` v0.133
-  frames, incl. the streaming-vs-response dedup regression.)
-- **Follow-on debt (non-blocking, from final review):** vestigial `TurnResult` enum;
-  `by_subtask` failure emits `SessionFailed{lead}` after `SessionDone{lead}`; no
-  cycle detection in `validate()`; `testing` module is unconditionally `pub`.
+  (orchestrator +4 = cycle detection tests.)
+- **Cleanup items (landed 2026-05-25):** worktree `cleanup()` wired on normal fleet
+  completion (kept on cancel for inspection); route cycle detection in `validate()`
+  (DFS-based, detects self-loops, two-node cycles, fan-out cycles); `cap.session.ready`
+  event formally defined in spec; README milestone table updated; 5 example manifests
+  created in `examples/`.
+- **Remaining follow-on debt (non-blocking):** vestigial `TurnResult` enum;
+  `by_subtask` failure emits `SessionFailed{lead}` after `SessionDone{lead}`;
+  `testing` module is unconditionally `pub`.
 - **Next:** sub-projects 2–5 (the remote-control vision proper) — remote transport
   (WS over Tailscale) → push-based remote permission approval → mobile app. All three
   first-class agents are now on structured protocols, so the orchestration core is done.
-  Minor cleanup still on deck: wire worktree `cleanup()`, strip TUI chrome from the
-  `pty:<cmd>` fallback's boundary output (low priority — the three real agents don't
-  need it anymore).
+  Minor cleanup on deck: strip TUI chrome from the `pty:<cmd>` fallback's boundary
+  output (low priority — the three real agents don't need it anymore).
 
 ---
 
