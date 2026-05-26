@@ -55,8 +55,7 @@ async fn main() -> anyhow::Result<()> {
 fn cmd_validate(path: PathBuf) -> anyhow::Result<()> {
     let yaml = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
-    let spec = FleetSpec::from_yaml(&yaml)
-        .map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
+    let spec = FleetSpec::from_yaml(&yaml).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
     spec.validate()
         .map_err(|e| anyhow::anyhow!("validation error: {e}"))?;
     println!("✓ {} is valid", path.display());

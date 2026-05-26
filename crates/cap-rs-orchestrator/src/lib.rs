@@ -11,6 +11,7 @@ pub mod executor;
 pub mod factory;
 pub mod real_factory;
 pub mod registry;
+pub mod routing;
 pub mod session;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;

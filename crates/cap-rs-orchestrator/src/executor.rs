@@ -12,10 +12,11 @@ use tracing::debug;
 
 use crate::OrchestratorError;
 use crate::audit::AuditLog;
-use crate::config::{Action, FleetSpec, PermissionPolicy, SessionId, Split};
+use crate::config::{FleetSpec, PermissionPolicy, SessionId};
 use crate::event::{OrchestratorControl, OrchestratorEvent};
 use crate::factory::DriverFactory;
 use crate::registry::SessionRegistry;
+use crate::routing::{RouteDecision, RoutingContext, RoutingStrategy, StaticRouting};
 use crate::worktree::WorktreeManager;
 
 /// A handle to a running fleet: query the audit log, answer asks, cancel.
@@ -77,7 +78,7 @@ fn task_prompt(task: &str) -> ClientFrame {
 pub struct Executor;
 
 impl Executor {
-    /// Start the fleet. Returns a handle plus the outbound event stream.
+    /// Start the fleet with the default static YAML routing strategy.
     pub async fn start<F, W>(
         spec: FleetSpec,
         factory: F,
@@ -87,6 +88,23 @@ impl Executor {
     where
         F: DriverFactory + 'static,
         W: WorktreeManager + 'static,
+    {
+        let strategy = StaticRouting::new(spec.fleet.routes.clone());
+        Self::start_with_strategy(spec, factory, worktree, task, strategy).await
+    }
+
+    /// Start the fleet with a custom routing strategy.
+    pub async fn start_with_strategy<F, W, S>(
+        spec: FleetSpec,
+        factory: F,
+        worktree: W,
+        task: &str,
+        strategy: S,
+    ) -> Result<(ExecutorHandle, mpsc::Receiver<OrchestratorEvent>), OrchestratorError>
+    where
+        F: DriverFactory + 'static,
+        W: WorktreeManager + 'static,
+        S: RoutingStrategy,
     {
         spec.validate()?;
 
@@ -106,6 +124,7 @@ impl Executor {
         tokio::spawn(async move {
             let mut run = Run {
                 spec,
+                strategy: Box::new(strategy),
                 factory,
                 worktree,
                 task,
@@ -128,6 +147,7 @@ impl Executor {
 
 struct Run<F: DriverFactory, W: WorktreeManager> {
     spec: FleetSpec,
+    strategy: Box<dyn RoutingStrategy>,
     factory: F,
     worktree: W,
     task: String,
@@ -146,25 +166,6 @@ struct Run<F: DriverFactory, W: WorktreeManager> {
 }
 
 impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
-    /// Build the prompt for a routed/fanned-out session: the original task plus
-    /// the accumulated output of each upstream (trigger) session. Falls back to
-    /// just the task if no upstream produced text.
-    fn routed_payload(&self, triggers: &[String]) -> String {
-        let mut parts = Vec::new();
-        for t in triggers {
-            if let Some(buf) = self.buffers.get(t) {
-                if !buf.is_empty() {
-                    parts.push(format!("--- output from {t} ---\n{buf}"));
-                }
-            }
-        }
-        if parts.is_empty() {
-            self.task.clone()
-        } else {
-            format!("{}\n\n{}", self.task, parts.join("\n\n"))
-        }
-    }
-
     /// Effective permission policy for a session (per-session override or fleet default).
     fn policy_for(&self, id: &str) -> Result<PermissionPolicy, OrchestratorError> {
         let s = self.spec.fleet.sessions.get(id).ok_or_else(|| {
@@ -352,15 +353,22 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
     }
 
     /// React to a session finishing. Returns `true` when the fleet is complete.
-    /// Forwards `SessionDone` to the consumer before processing routes (so the
-    /// consumer sees done-then-routed ordering), or `SessionFailed` when routing
-    /// (e.g. `by_subtask`) fails (no `SessionDone` emitted).
+    /// Delegates routing decisions to the [`RoutingStrategy`].
     async fn on_session_done(&mut self, session: &SessionId, stop: StopReason) -> bool {
         debug!(%session, ?stop, "session done");
         self.done.insert(session.clone());
 
-        // A join fires only once — when its last member completes — because
-        // every member is in `done` only then.
+        let ctx = RoutingContext {
+            spec: &self.spec,
+            done: &self.done,
+            failed: &self.failed,
+            spawned: &self.spawned,
+            buffers: &self.buffers,
+            task: &self.task,
+        };
+
+        let decisions = self.strategy.on_session_done(&ctx, session, stop).await;
+
         enum Fire {
             Route(SessionId, ClientFrame),
             Select(Vec<SessionId>),
@@ -369,48 +377,23 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
         let mut fires: Vec<Fire> = Vec::new();
         let mut routing_failed = false;
 
-        for route in &self.spec.fleet.routes {
-            let triggers = route.trigger_sessions();
-            if !triggers.iter().any(|t| t == session) {
-                continue;
-            }
-            if !triggers.iter().all(|t| self.done.contains(t)) {
-                continue; // join not yet complete
-            }
-            match route.action().expect("validated") {
-                Action::RouteTo(to) => {
-                    let payload = self.routed_payload(&triggers);
-                    fires.push(Fire::Route(to, task_prompt(&payload)));
+        for d in decisions {
+            match d {
+                RouteDecision::Route { target, payload } => {
+                    fires.push(Fire::Route(target, task_prompt(&payload)));
                 }
-                Action::FanOut(f) => match f.split {
-                    Split::Broadcast => {
-                        let payload = self.routed_payload(&triggers);
-                        for to in f.to {
-                            fires.push(Fire::Route(to, task_prompt(&payload)));
-                        }
+                RouteDecision::FanOut { targets } => {
+                    for (target, payload) in targets {
+                        fires.push(Fire::Route(target, task_prompt(&payload)));
                     }
-                    Split::BySubtask => {
-                        let buf = self.buffers.get(session).cloned().unwrap_or_default();
-                        match parse_subtasks(&buf) {
-                            Some(items) => {
-                                for (i, to) in f.to.iter().enumerate() {
-                                    // Guard against more targets than subtasks:
-                                    // stop assigning rather than wrapping around.
-                                    if i >= items.len() {
-                                        routing_failed = true;
-                                        break;
-                                    }
-                                    let sub = items[i].clone();
-                                    fires.push(Fire::Route(to.clone(), task_prompt(&sub)));
-                                }
-                            }
-                            _ => {
-                                routing_failed = true;
-                            }
-                        }
-                    }
-                },
-                Action::Collect(_) => fires.push(Fire::Select(triggers.clone())),
+                }
+                RouteDecision::Select { candidates } => {
+                    fires.push(Fire::Select(candidates));
+                }
+                RouteDecision::Error(_) => {
+                    routing_failed = true;
+                }
+                RouteDecision::None => {}
             }
         }
 
@@ -480,25 +463,4 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
             .iter()
             .all(|s| self.done.contains(s) || self.failed.contains(s))
     }
-}
-
-/// Hard cap on subtasks per fan-out to bound allocations from runaway agent
-/// output. 256 is generous for any realistic decomposition.
-const MAX_SUBTASKS: usize = 256;
-
-/// Parse a fenced `cap-subtasks` block — a JSON array of strings — out of agent
-/// text. The fence is three backticks; the delimiter is built at runtime so
-/// this source stays free of literal triple-backticks.
-fn parse_subtasks(text: &str) -> Option<Vec<String>> {
-    let fence = "`".repeat(3);
-    let open = format!("{fence}cap-subtasks");
-    let start = text.find(&open)? + open.len();
-    let rest = &text[start..];
-    let end = rest.find(&fence)?;
-    let mut items: Vec<String> = serde_json::from_str(rest[..end].trim()).ok()?;
-    if items.is_empty() {
-        return None;
-    }
-    items.truncate(MAX_SUBTASKS);
-    Some(items)
 }
