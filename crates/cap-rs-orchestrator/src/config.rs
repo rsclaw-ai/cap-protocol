@@ -47,10 +47,12 @@ pub enum PermissionPolicy {
     Bypass,
 }
 
-/// `claude` | `codex` | `grpc:<addr>` | `acp:<command>` | `pty:<command>`.
+/// `claude` | `openclaude` | `codex` | `grpc:<addr>` | `acp:<command>` | `pty:<command>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriverKind {
     Claude,
+    /// OpenClaude via stream-json (Anthropic SDK-compatible CLI).
+    OpenClaude,
     Codex,
     /// Structured Agent Client Protocol agent (e.g. `acp:opencode`).
     Acp(String),
@@ -64,6 +66,7 @@ impl<'de> Deserialize<'de> for DriverKind {
         let s = String::deserialize(d)?;
         Ok(match s.as_str() {
             "claude" => DriverKind::Claude,
+            "openclaude" => DriverKind::OpenClaude,
             "codex" => DriverKind::Codex,
             other => {
                 if let Some(addr) = other.strip_prefix("grpc:") {
@@ -89,7 +92,7 @@ impl<'de> Deserialize<'de> for DriverKind {
                     DriverKind::Pty(cmd.to_string())
                 } else {
                     return Err(serde::de::Error::custom(format!(
-                        "unknown driver kind '{other}' (expected claude | codex | grpc:<host:port> | acp:<cmd> | pty:<cmd>)"
+                        "unknown driver kind '{other}' (expected claude | openclaude | codex | grpc:<host:port> | acp:<cmd> | pty:<cmd>)"
                     )));
                 }
             }
@@ -101,6 +104,7 @@ impl<'de> Deserialize<'de> for DriverKind {
 pub fn list_driver_kinds() -> Vec<&'static str> {
     vec![
         "claude       Claude Code CLI (stream-json)",
+        "openclaude   OpenClaude CLI (stream-json, Anthropic SDK-compatible)",
         "codex        OpenAI Codex CLI (MCP)",
         "acp:<cmd>    Any ACP-compatible agent (e.g. acp:opencode)",
         "grpc:<addr>  OpenClaude gRPC server (e.g. grpc:localhost:50051)",
@@ -575,6 +579,19 @@ fleet:
 "#;
         let spec = FleetSpec::from_yaml(yaml).unwrap();
         assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn parses_openclaude_driver_kind() {
+        let yaml = r#"
+fleet:
+  base_branch: main
+  sessions:
+    oc: { driver: openclaude }
+  start: oc
+"#;
+        let spec = FleetSpec::from_yaml(yaml).unwrap();
+        assert_eq!(spec.fleet.sessions["oc"].driver, DriverKind::OpenClaude);
     }
 
     #[test]

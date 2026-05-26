@@ -8,6 +8,9 @@
 //! still works (with the codex-tuned [`TuiParser::codex`]) if a caller needs
 //! the old behavior. `pty:openclaude` uses a tuned parser with `>` prompt
 //! markers from the reference manifest.
+//!
+//! `openclaude` uses stream-json (same as claude) for maximum fidelity;
+//! `grpc:<addr>` is the alternative gRPC path with reduced event detail.
 
 use std::path::Path;
 
@@ -39,6 +42,18 @@ impl DriverFactory for RealDriverFactory {
         match kind {
             DriverKind::Claude => {
                 let driver = ClaudeCodeDriver::builder(cwd)
+                    .dangerously_skip_permissions(bypass)
+                    .spawn()
+                    .await?;
+                Ok(Box::new(driver))
+            }
+            // openclaude: stream-json fast-path (Anthropic SDK-compatible).
+            // Higher fidelity than gRPC: per-token streaming, structured
+            // tool/permission events, full usage stats. Uses the same
+            // ClaudeCodeDriver with `bin("openclaude")`.
+            DriverKind::OpenClaude => {
+                let driver = ClaudeCodeDriver::builder(cwd)
+                    .bin("openclaude")
                     .dangerously_skip_permissions(bypass)
                     .spawn()
                     .await?;
