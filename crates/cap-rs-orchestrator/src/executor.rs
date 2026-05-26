@@ -12,7 +12,7 @@ use tracing::debug;
 
 use crate::OrchestratorError;
 use crate::audit::AuditLog;
-use crate::config::{FleetSpec, PermissionPolicy, SessionId};
+use crate::config::{DriverKind, FleetSpec, PermissionPolicy, SessionId};
 use crate::event::{OrchestratorControl, OrchestratorEvent};
 use crate::factory::DriverFactory;
 use crate::registry::SessionRegistry;
@@ -192,12 +192,33 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                 return false;
             }
         };
+        self.do_spawn(id, &kind, policy).await
+    }
+
+    /// Spawn a dynamic session (not in the YAML spec) with explicit driver kind
+    /// and permission policy.
+    async fn spawn_dynamic(
+        &mut self,
+        id: &SessionId,
+        kind: &DriverKind,
+        policy: PermissionPolicy,
+    ) -> bool {
+        self.do_spawn(id, kind, policy).await
+    }
+
+    /// Shared spawn logic used by both static and dynamic paths.
+    async fn do_spawn(
+        &mut self,
+        id: &SessionId,
+        kind: &DriverKind,
+        policy: PermissionPolicy,
+    ) -> bool {
         let base = &self.spec.fleet.base_branch;
         match self
             .registry
             .spawn(
                 id.clone(),
-                &kind,
+                kind,
                 policy,
                 base,
                 &self.factory,
@@ -371,6 +392,12 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
 
         enum Fire {
             Route(SessionId, ClientFrame),
+            Dynamic {
+                id: SessionId,
+                frame: ClientFrame,
+                kind: DriverKind,
+                permissions: PermissionPolicy,
+            },
             Select(Vec<SessionId>),
         }
 
@@ -381,6 +408,19 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
             match d {
                 RouteDecision::Route { target, payload } => {
                     fires.push(Fire::Route(target, task_prompt(&payload)));
+                }
+                RouteDecision::DynamicRoute {
+                    target,
+                    payload,
+                    driver,
+                    permissions,
+                } => {
+                    fires.push(Fire::Dynamic {
+                        id: target,
+                        frame: task_prompt(&payload),
+                        kind: driver,
+                        permissions,
+                    });
                 }
                 RouteDecision::FanOut { targets } => {
                     for (target, payload) in targets {
@@ -440,6 +480,30 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                         })
                         .await;
                     let _ = self.registry.route(&to, frame).await;
+                }
+                Fire::Dynamic {
+                    id,
+                    frame,
+                    kind,
+                    permissions,
+                } => {
+                    if !self.registry.is_live(&id)
+                        && !self.spawn_dynamic(&id, &kind, permissions).await
+                    {
+                        continue;
+                    }
+                    self.audit
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record_route(&from, &id);
+                    let _ = self
+                        .out
+                        .send(OrchestratorEvent::Routed {
+                            from: from.clone(),
+                            to: id.clone(),
+                        })
+                        .await;
+                    let _ = self.registry.route(&id, frame).await;
                 }
                 Fire::Select(candidates) => {
                     let _ = self

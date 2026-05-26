@@ -4,8 +4,24 @@ use std::path::PathBuf;
 
 use cap_rs_orchestrator::config::{FleetSpec, PermissionPolicy};
 use cap_rs_orchestrator::event::{OrchestratorControl, OrchestratorEvent};
-use clap::{Parser, Subcommand};
+use cap_rs_orchestrator::routing::{CliLlmClient, LlmRouting, LlmRoutingConfig, LlmSessionSpec};
+use clap::{Parser, Subcommand, ValueEnum};
 use tokio::io::{AsyncBufReadExt, BufReader};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ModeArg {
+    Static,
+    Llm,
+}
+
+impl std::fmt::Display for ModeArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ModeArg::Static => write!(f, "static"),
+            ModeArg::Llm => write!(f, "llm"),
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -39,6 +55,9 @@ enum Command {
         /// Force fleet-wide bypass: auto-approve every permission request.
         #[arg(long)]
         bypass: bool,
+        /// Routing strategy: static (default) or llm.
+        #[arg(long, default_value = "static")]
+        mode: ModeArg,
     },
 }
 
@@ -48,7 +67,12 @@ async fn main() -> anyhow::Result<()> {
         Command::Validate { path } => cmd_validate(path),
         Command::ListDrivers => cmd_list_drivers(),
         Command::Init => cmd_init(),
-        Command::Run { path, task, bypass } => cmd_run(path, task, bypass).await,
+        Command::Run {
+            path,
+            task,
+            bypass,
+            mode,
+        } => cmd_run(path, task, bypass, mode).await,
     }
 }
 
@@ -88,7 +112,12 @@ fn cmd_init() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_run(path: PathBuf, task: Option<String>, bypass: bool) -> anyhow::Result<()> {
+async fn cmd_run(
+    path: PathBuf,
+    task: Option<String>,
+    bypass: bool,
+    mode: ModeArg,
+) -> anyhow::Result<()> {
     let yaml = std::fs::read_to_string(&path)?;
     let mut spec = FleetSpec::from_yaml(&yaml).map_err(|e| anyhow::anyhow!("{e}"))?;
     if bypass {
@@ -123,9 +152,48 @@ async fn cmd_run(path: PathBuf, task: Option<String>, bypass: bool) -> anyhow::R
             }
         })
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let (handle, mut events) = cap_rs_orchestrator::run(spec, repo, &effective_task)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (handle, mut events) = match mode {
+        ModeArg::Static => cap_rs_orchestrator::run(spec, repo, &effective_task)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        ModeArg::Llm => {
+            let llm_sessions: Vec<LlmSessionSpec> = spec
+                .fleet
+                .sessions
+                .iter()
+                .map(|(id, s)| LlmSessionSpec {
+                    id: id.clone(),
+                    role: s.role.clone(),
+                })
+                .collect();
+            let command = spec
+                .fleet
+                .llm
+                .as_ref()
+                .and_then(|c| c.command.clone())
+                .unwrap_or_else(|| vec!["claude".into(), "-p".into()]);
+            let mut config = LlmRoutingConfig::default();
+            if let Some(ref llm) = spec.fleet.llm {
+                if let Some(ref sp) = llm.system_prompt {
+                    config.system_prompt = sp.clone();
+                }
+                if let Some(t) = llm.timeout_secs {
+                    config.timeout = std::time::Duration::from_secs(t);
+                }
+                if let Some(m) = llm.max_decisions {
+                    config.max_decisions = m;
+                }
+                if let Some(c) = llm.max_context_chars {
+                    config.max_context_chars = c;
+                }
+            }
+            let client = Box::new(CliLlmClient::new(command));
+            let strategy = LlmRouting::new(client, llm_sessions, config);
+            cap_rs_orchestrator::run_with_strategy(spec, repo, &effective_task, strategy)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+        }
+    };
 
     let control = handle.control_sender();
     tokio::spawn(async move {
