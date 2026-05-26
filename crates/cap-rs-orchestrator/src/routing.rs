@@ -708,6 +708,7 @@ impl LlmClient for StubLlmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{FanOut, Trigger};
 
     // -- parse_subtasks tests ------------------------------------------------
 
@@ -975,5 +976,249 @@ mod tests {
     #[test]
     fn extract_json_returns_none_when_no_brace() {
         assert!(extract_json("no braces here").is_none());
+    }
+
+    // -- SessionSummary tests -------------------------------------------------
+
+    #[test]
+    fn session_summary_build_all_lists_all_sessions() {
+        let mut done = HashSet::new();
+        done.insert("a".into());
+        let mut failed = HashSet::new();
+        failed.insert("b".into());
+        let mut spawned = HashSet::new();
+        spawned.insert("c".into());
+        let ctx = RoutingContext {
+            spec: &FleetSpec::from_yaml(
+                "fleet:\n  base_branch: main\n  sessions:\n    a: { driver: claude }\n    b: { driver: codex }\n    c: { driver: claude }\n  start: a\n",
+            )
+            .unwrap(),
+            done: &done,
+            failed: &failed,
+            spawned: &spawned,
+            buffers: &HashMap::new(),
+            task: &"test",
+        };
+        let summaries = SessionSummary::build_all(&ctx, 100);
+        assert_eq!(summaries.len(), 3);
+        let ids: HashSet<&str> = summaries.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains("a"));
+        assert!(ids.contains("b"));
+        assert!(ids.contains("c"));
+    }
+
+    #[test]
+    fn session_summary_status_reflects_state() {
+        let mut done = HashSet::new();
+        done.insert("ok".into());
+        let mut failed = HashSet::new();
+        failed.insert("fail".into());
+        let spawned = HashSet::from(["ok".into(), "fail".into(), "running".into()]);
+        let ctx = RoutingContext {
+            spec: &FleetSpec::from_yaml(
+                "fleet:\n  base_branch: main\n  sessions:\n    ok: { driver: claude }\n    fail: { driver: codex }\n    running: { driver: claude }\n  start: ok\n",
+            )
+            .unwrap(),
+            done: &done,
+            failed: &failed,
+            spawned: &spawned,
+            buffers: &HashMap::new(),
+            task: &"test",
+        };
+        let summaries = SessionSummary::build_all(&ctx, 100);
+        let get = |id: &str| summaries.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(get("ok").status, SessionStatus::Completed);
+        assert_eq!(get("fail").status, SessionStatus::Failed);
+        assert_eq!(get("running").status, SessionStatus::Running);
+    }
+
+    // -- DynamicRoute tests ---------------------------------------------------
+
+    #[test]
+    fn parse_llm_dynamic_route_with_driver_field() {
+        let json = r#"{"actions": [{"type": "route", "target": "spy", "driver": "codex", "context": "sneak"}], "reasoning": "ok"}"#;
+        // "spy" is NOT in valid_sessions, but `driver` field should allow it
+        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
+        assert_eq!(decisions.len(), 1);
+        match &decisions[0] {
+            RouteDecision::DynamicRoute {
+                target,
+                payload,
+                driver,
+                permissions,
+            } => {
+                assert_eq!(target, "spy");
+                assert_eq!(payload, "sneak");
+                assert_eq!(*driver, DriverKind::Codex);
+                assert_eq!(*permissions, PermissionPolicy::Allow);
+            }
+            other => panic!("expected DynamicRoute, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_llm_dynamic_route_with_grpc_driver() {
+        let json = r#"{"actions": [{"type": "route", "target": "remote", "driver": "grpc:localhost:50051", "context": "do stuff"}], "reasoning": "ok"}"#;
+        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
+        assert_eq!(decisions.len(), 1);
+        match &decisions[0] {
+            RouteDecision::DynamicRoute {
+                target, driver, ..
+            } => {
+                assert_eq!(target, "remote");
+                assert_eq!(*driver, DriverKind::Grpc("localhost:50051".into()));
+            }
+            other => panic!("expected DynamicRoute, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_llm_unknown_driver_returns_error() {
+        let json = r#"{"actions": [{"type": "route", "target": "spy", "driver": "nonexistent", "context": "x"}], "reasoning": "bad"}"#;
+        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
+        assert_eq!(decisions.len(), 1);
+        assert!(matches!(&decisions[0], RouteDecision::Error(msg) if msg.contains("unknown driver")));
+    }
+
+    #[test]
+    fn parse_llm_unknown_target_without_driver_mentions_driver_field() {
+        let json = r#"{"actions": [{"type": "route", "target": "ghost", "context": "x"}], "reasoning": "bad"}"#;
+        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
+        assert_eq!(decisions.len(), 1);
+        assert!(matches!(&decisions[0], RouteDecision::Error(msg) if msg.contains("driver")));
+    }
+
+    // -- HybridRouting tests --------------------------------------------------
+
+    #[tokio::test]
+    async fn hybrid_routing_uses_static_when_route_matches() {
+        let routes = vec![Route {
+            when: Trigger::Single("coder.done".into()),
+            route_to: Some("reviewer".into()),
+            fan_out: None,
+            collect: None,
+        }];
+        let client = Box::new(StubLlmClient::new(vec![
+            r#"{"actions": [{"type": "complete"}], "reasoning": "should not be called"}"#.into(),
+        ]));
+        let llm = LlmRouting::new(
+            client,
+            vec![
+                LlmSessionSpec { id: "coder".into(), role: None },
+                LlmSessionSpec { id: "reviewer".into(), role: None },
+            ],
+            LlmRoutingConfig::default(),
+        );
+        let hybrid = HybridRouting::new(routes, llm);
+
+        let mut done = HashSet::new();
+        done.insert("coder".into());
+        let mut spawned = HashSet::new();
+        spawned.insert("coder".into());
+        let mut buffers = HashMap::new();
+        buffers.insert("coder".into(), "my code".into());
+        let ctx = RoutingContext {
+            spec: &FleetSpec::from_yaml(
+                "fleet:\n  base_branch: main\n  sessions:\n    coder: { driver: claude }\n    reviewer: { driver: codex }\n  start: coder\n",
+            )
+            .unwrap(),
+            done: &done,
+            failed: &HashSet::new(),
+            spawned: &spawned,
+            buffers: &buffers,
+            task: &"build it",
+        };
+
+        let decisions = hybrid.on_session_done(&ctx, &"coder".into(), StopReason::EndTurn).await;
+        // Static route should match before LLM is consulted
+        assert_eq!(decisions.len(), 1);
+        assert!(matches!(&decisions[0], RouteDecision::Route { target, .. } if target == "reviewer"));
+    }
+
+    #[tokio::test]
+    async fn hybrid_routing_falls_back_to_llm_when_no_static_match() {
+        // Route that won't match (different trigger session)
+        let routes = vec![Route {
+            when: Trigger::Single("other-session.done".into()),
+            route_to: Some("reviewer".into()),
+            fan_out: None,
+            collect: None,
+        }];
+        let client = Box::new(StubLlmClient::new(vec![
+            r#"{"actions": [{"type": "route", "target": "reviewer", "context": "review this"}], "reasoning": "llm decision"}"#.into(),
+        ]));
+        let llm = LlmRouting::new(
+            client,
+            vec![
+                LlmSessionSpec { id: "coder".into(), role: None },
+                LlmSessionSpec { id: "reviewer".into(), role: None },
+            ],
+            LlmRoutingConfig::default(),
+        );
+        let hybrid = HybridRouting::new(routes, llm);
+
+        let mut done = HashSet::new();
+        done.insert("coder".into());
+        let mut spawned = HashSet::new();
+        spawned.insert("coder".into());
+        let mut buffers = HashMap::new();
+        buffers.insert("coder".into(), "some output".into());
+        let ctx = RoutingContext {
+            spec: &FleetSpec::from_yaml(
+                "fleet:\n  base_branch: main\n  sessions:\n    coder: { driver: claude }\n    reviewer: { driver: codex }\n  start: coder\n",
+            )
+            .unwrap(),
+            done: &done,
+            failed: &HashSet::new(),
+            spawned: &spawned,
+            buffers: &buffers,
+            task: &"build it",
+        };
+
+        let decisions = hybrid.on_session_done(&ctx, &"coder".into(), StopReason::EndTurn).await;
+        assert_eq!(decisions.len(), 1);
+        assert!(matches!(&decisions[0], RouteDecision::Route { target, .. } if target == "reviewer"));
+    }
+
+    #[tokio::test]
+    async fn hybrid_routing_fan_out_not_overridden_by_llm() {
+        let routes = vec![Route {
+            when: Trigger::Single("lead.done".into()),
+            route_to: None,
+            fan_out: Some(FanOut {
+                to: vec!["worker1".into(), "worker2".into()],
+                split: Split::Broadcast,
+            }),
+            collect: None,
+        }];
+        let client = Box::new(StubLlmClient::new(vec![
+            r#"{"actions": [{"type": "complete"}], "reasoning": "should not be called"}"#.into(),
+        ]));
+        let llm = LlmRouting::new(
+            client,
+            vec![LlmSessionSpec { id: "lead".into(), role: None }],
+            LlmRoutingConfig::default(),
+        );
+        let hybrid = HybridRouting::new(routes, llm);
+
+        let mut done = HashSet::new();
+        done.insert("lead".into());
+        let mut spawned = HashSet::new();
+        spawned.insert("lead".into());
+        let ctx = RoutingContext {
+            spec: &FleetSpec::from_yaml(
+                "fleet:\n  base_branch: main\n  sessions:\n    lead: { driver: claude }\n    worker1: { driver: codex }\n    worker2: { driver: codex }\n  start: lead\n",
+            )
+            .unwrap(),
+            done: &done,
+            failed: &HashSet::new(),
+            spawned: &spawned,
+            buffers: &HashMap::new(),
+            task: &"parallel work",
+        };
+
+        let decisions = hybrid.on_session_done(&ctx, &"lead".into(), StopReason::EndTurn).await;
+        assert_eq!(decisions.len(), 1);
+        assert!(matches!(&decisions[0], RouteDecision::FanOut { targets } if targets.len() == 2));
     }
 }

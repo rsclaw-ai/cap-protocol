@@ -4,14 +4,18 @@ use std::path::PathBuf;
 
 use cap_rs_orchestrator::config::{FleetSpec, PermissionPolicy};
 use cap_rs_orchestrator::event::{OrchestratorControl, OrchestratorEvent};
-use cap_rs_orchestrator::routing::{CliLlmClient, LlmRouting, LlmRoutingConfig, LlmSessionSpec};
+use cap_rs_orchestrator::routing::{
+    CliLlmClient, HybridRouting, LlmRouting, LlmRoutingConfig, LlmSessionSpec,
+};
 use clap::{Parser, Subcommand, ValueEnum};
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ModeArg {
     Static,
     Llm,
+    Hybrid,
 }
 
 impl std::fmt::Display for ModeArg {
@@ -19,6 +23,7 @@ impl std::fmt::Display for ModeArg {
         match self {
             ModeArg::Static => write!(f, "static"),
             ModeArg::Llm => write!(f, "llm"),
+            ModeArg::Hybrid => write!(f, "hybrid"),
         }
     }
 }
@@ -55,7 +60,7 @@ enum Command {
         /// Force fleet-wide bypass: auto-approve every permission request.
         #[arg(long)]
         bypass: bool,
-        /// Routing strategy: static (default) or llm.
+        /// Routing strategy: static (default), llm, or hybrid.
         #[arg(long, default_value = "static")]
         mode: ModeArg,
     },
@@ -63,6 +68,18 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Initialize tracing subscriber for debug logging
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("cap_rs=debug".parse().unwrap()),
+        )
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_file(false)
+        .with_line_number(false)
+        .init();
+
     match Cli::parse().command {
         Command::Validate { path } => cmd_validate(path),
         Command::ListDrivers => cmd_list_drivers(),
@@ -112,6 +129,43 @@ fn cmd_init() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Build an `LlmRoutingConfig` + `CliLlmClient` from the fleet config, applying overrides.
+fn llm_routing_from_spec(
+    spec: &FleetSpec,
+) -> (Vec<LlmSessionSpec>, LlmRoutingConfig, Box<CliLlmClient>) {
+    let llm_sessions: Vec<LlmSessionSpec> = spec
+        .fleet
+        .sessions
+        .iter()
+        .map(|(id, s)| LlmSessionSpec {
+            id: id.clone(),
+            role: s.role.clone(),
+        })
+        .collect();
+    let command = spec
+        .fleet
+        .llm
+        .as_ref()
+        .and_then(|c| c.command.clone())
+        .unwrap_or_else(|| vec!["claude".into(), "-p".into()]);
+    let mut config = LlmRoutingConfig::default();
+    if let Some(ref llm) = spec.fleet.llm {
+        if let Some(ref sp) = llm.system_prompt {
+            config.system_prompt = sp.clone();
+        }
+        if let Some(t) = llm.timeout_secs {
+            config.timeout = std::time::Duration::from_secs(t);
+        }
+        if let Some(m) = llm.max_decisions {
+            config.max_decisions = m;
+        }
+        if let Some(c) = llm.max_context_chars {
+            config.max_context_chars = c;
+        }
+    }
+    (llm_sessions, config, Box::new(CliLlmClient::new(command)))
+}
+
 async fn cmd_run(
     path: PathBuf,
     task: Option<String>,
@@ -157,38 +211,17 @@ async fn cmd_run(
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?,
         ModeArg::Llm => {
-            let llm_sessions: Vec<LlmSessionSpec> = spec
-                .fleet
-                .sessions
-                .iter()
-                .map(|(id, s)| LlmSessionSpec {
-                    id: id.clone(),
-                    role: s.role.clone(),
-                })
-                .collect();
-            let command = spec
-                .fleet
-                .llm
-                .as_ref()
-                .and_then(|c| c.command.clone())
-                .unwrap_or_else(|| vec!["claude".into(), "-p".into()]);
-            let mut config = LlmRoutingConfig::default();
-            if let Some(ref llm) = spec.fleet.llm {
-                if let Some(ref sp) = llm.system_prompt {
-                    config.system_prompt = sp.clone();
-                }
-                if let Some(t) = llm.timeout_secs {
-                    config.timeout = std::time::Duration::from_secs(t);
-                }
-                if let Some(m) = llm.max_decisions {
-                    config.max_decisions = m;
-                }
-                if let Some(c) = llm.max_context_chars {
-                    config.max_context_chars = c;
-                }
-            }
-            let client = Box::new(CliLlmClient::new(command));
+            let (llm_sessions, config, client) = llm_routing_from_spec(&spec);
             let strategy = LlmRouting::new(client, llm_sessions, config);
+            cap_rs_orchestrator::run_with_strategy(spec, repo, &effective_task, strategy)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+        }
+        ModeArg::Hybrid => {
+            let routes = spec.fleet.routes.clone();
+            let (llm_sessions, config, client) = llm_routing_from_spec(&spec);
+            let llm = LlmRouting::new(client, llm_sessions, config);
+            let strategy = HybridRouting::new(routes, llm);
             cap_rs_orchestrator::run_with_strategy(spec, repo, &effective_task, strategy)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?
@@ -196,53 +229,93 @@ async fn cmd_run(
     };
 
     let control = handle.control_sender();
+    let ctrl_c_control = control.clone();
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             eprintln!("\n^C — cancelling fleet…");
-            let _ = control.send(OrchestratorControl::Cancel).await;
+            let _ = ctrl_c_control.send(OrchestratorControl::Cancel).await;
         }
     });
 
-    let mut stdin = BufReader::new(tokio::io::stdin()).lines();
-
-    let mut saw_fleet_complete = false;
-    while let Some(ev) = events.recv().await {
-        match ev {
-            OrchestratorEvent::SessionStarted { session } => println!("▶ {session} started"),
-            OrchestratorEvent::Agent { session, event } => println!("[{session}] {event:?}"),
-            OrchestratorEvent::Routed { from, to } => println!("→ routed {from} → {to}"),
-            OrchestratorEvent::SessionDone {
-                session,
-                stop_reason,
-            } => {
-                println!("✓ {session} done ({stop_reason:?})")
-            }
-            OrchestratorEvent::SessionFailed { session, error } => {
-                println!("✗ {session} failed: {error}")
-            }
-            OrchestratorEvent::Ask {
-                session,
-                req_id,
-                tool,
-                risk_level,
-            } => {
-                println!("⚠ {session} wants to use {tool} (risk: {risk_level:?}) — allow? [y/N]");
-                let line = stdin.next_line().await?.unwrap_or_default();
-                let allow = matches!(line.trim(), "y" | "Y" | "yes");
-                handle.decide(session, req_id, allow).await;
-            }
-            OrchestratorEvent::AwaitSelection { candidates } => {
-                println!(
-                    "⊙ candidates ready for manual review (one git worktree each): {}",
-                    candidates.join(", ")
-                );
-            }
-            OrchestratorEvent::FleetComplete => {
-                println!("== fleet complete ==");
-                saw_fleet_complete = true;
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(256);
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(tokio::io::stdin()).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if stdin_tx.send(line).await.is_err() {
                 break;
             }
-            _ => {}
+        }
+    });
+
+    let mut saw_fleet_complete = false;
+    loop {
+        tokio::select! {
+            ev = events.recv() => {
+                let Some(ev) = ev else { break };
+                match ev {
+                    OrchestratorEvent::SessionStarted { session } => {
+                        println!("▶ {session} started");
+                    }
+                    OrchestratorEvent::Agent { session, event } => {
+                        println!("[{session}] {event:?}");
+                    }
+                    OrchestratorEvent::Routed { from, to } => {
+                        println!("→ routed {from} → {to}");
+                    }
+                    OrchestratorEvent::SessionDone { session, stop_reason } => {
+                        println!("✓ {session} done ({stop_reason:?})")
+                    }
+                    OrchestratorEvent::SessionFailed { session, error } => {
+                        println!("✗ {session} failed: {error}")
+                    }
+                    OrchestratorEvent::Ask {
+                        session,
+                        req_id,
+                        tool,
+                        risk_level,
+                    } => {
+                        println!("⚠ {session} wants to use {tool} (risk: {risk_level:?}) — allow? [y/N]");
+                        // Read permission response from stdin channel
+                        let line = stdin_rx.recv().await.unwrap_or_default();
+                        let allow = matches!(line.trim(), "y" | "Y" | "yes");
+                        handle.decide(session, req_id, allow).await;
+                    }
+                    OrchestratorEvent::AwaitSelection { candidates } => {
+                        println!(
+                            "⊙ candidates ready for manual review (one git worktree each): {}",
+                            candidates.join(", ")
+                        );
+                    }
+                    OrchestratorEvent::FleetComplete => {
+                        println!("== fleet complete ==");
+                        saw_fleet_complete = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            line = stdin_rx.recv() => {
+                let Some(line) = line else { continue };
+                let line = line.trim().to_string();
+                if line.is_empty() { continue; }
+                if line == "/q" || line == "/quit" {
+                    println!("quitting…");
+                    let _ = control.send(OrchestratorControl::Cancel).await;
+                    break;
+                }
+                // @session_name: message or @session_name message
+                if let Some(rest) = line.strip_prefix('@') {
+                    if let Some((session, msg)) = rest.split_once([' ', ':']) {
+                        let msg = msg.trim();
+                        if !msg.is_empty() {
+                            let _ = control.send(OrchestratorControl::UserMessage {
+                                session: session.trim().to_string(),
+                                text: msg.to_string(),
+                            }).await;
+                        }
+                    }
+                }
+            }
         }
     }
 

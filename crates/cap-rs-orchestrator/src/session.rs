@@ -89,7 +89,9 @@ pub fn spawn_session(
             }
         }
 
+        tracing::info!(session = %id, "sending prompt to driver");
         if let Err(e) = driver.send(frame).await {
+            tracing::error!(session = %id, error = %e, "failed to send prompt");
             bus_send(
                 &bus,
                 OrchestratorEvent::SessionFailed {
@@ -101,6 +103,7 @@ pub fn spawn_session(
             .await;
             return;
         }
+        tracing::info!(session = %id, "prompt sent, entering pump_turn");
 
         // Pump events until this turn ends (Done or error/cancel).
         let _ = pump_turn(&id, &mut driver, policy, &bus, &mut inbox_rx, &cancel).await;
@@ -136,6 +139,7 @@ async fn pump_turn(
     cancel: &CancellationToken,
 ) {
     loop {
+        tracing::debug!(session = %id, "waiting for next event");
         let ev = tokio::select! {
             biased;
             _ = cancel.cancelled() => { let _ = driver.shutdown().await; return; }
@@ -143,6 +147,7 @@ async fn pump_turn(
         };
 
         let Some(ev) = ev else {
+            tracing::warn!(session = %id, "driver.next_event() returned None");
             bus_send(
                 bus,
                 OrchestratorEvent::SessionFailed {
@@ -154,6 +159,7 @@ async fn pump_turn(
             .await;
             return;
         };
+        tracing::debug!(session = %id, event = ?ev, "received event");
 
         match ev {
             AgentEvent::Done { stop_reason, .. } => {

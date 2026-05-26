@@ -370,6 +370,17 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
             }
             // v1: selection is informational; the human merges the chosen worktree.
             OrchestratorControl::Select { .. } => {}
+            OrchestratorControl::UserMessage { session, text } => {
+                let _ = self
+                    .registry
+                    .route(
+                        &session,
+                        ClientFrame::Prompt {
+                            content: vec![Content::text(&text)],
+                        },
+                    )
+                    .await;
+            }
         }
     }
 

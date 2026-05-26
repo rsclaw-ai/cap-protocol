@@ -137,10 +137,12 @@ impl ClaudeCodeDriver {
         } = b;
 
         let bin = if is_opencode {
-            bin.or_else(|| std::env::var("OPENCODE_BIN").ok())
+            std::env::var("OPENCODE_BIN").ok()
+                .or(bin)
                 .unwrap_or_else(|| "opencode".to_string())
         } else {
-            bin.or_else(|| std::env::var("CLAUDE_BIN").ok())
+            std::env::var("CLAUDE_BIN").ok()
+                .or(bin)
                 .unwrap_or_else(|| "claude".to_string())
         };
 
@@ -157,7 +159,7 @@ impl ClaudeCodeDriver {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .kill_on_drop(true);
+                .kill_on_drop(false); // Don't kill on drop — let the process exit naturally
             if let Some(m) = &model {
                 cmd.arg("--model").arg(m);
             }
@@ -247,10 +249,34 @@ impl ClaudeCodeDriver {
         // Stderr drain — log only, don't surface as events.
         tokio::spawn(stderr_drain(stderr));
 
+        // Child waiter: capture exit status when the process exits naturally.
+        let exit_status_clone = std::sync::Arc::clone(&exit_status);
+        tokio::spawn(async move {
+            let status = child.wait().await;
+            let mut slot = exit_status_clone.lock().expect("exit_status mutex poisoned");
+            if slot.is_none() {
+                *slot = Some(match status {
+                    Ok(s) => {
+                        if let Some(code) = s.code() {
+                            debug!(exit_code = code, "agent process exited");
+                            DriverExitStatus::Exited { code: Some(code) }
+                        } else {
+                            debug!("agent process killed by signal");
+                            DriverExitStatus::Killed
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to wait for agent process");
+                        DriverExitStatus::Disconnected
+                    }
+                });
+            }
+        });
+
         Ok(Self {
             writer_tx: Some(writer_tx),
             reader_rx,
-            child: Some(child),
+            child: None, // Child is now owned by the waiter task
             exited,
             exit_status,
         })
@@ -446,6 +472,7 @@ async fn reader_task(
                     }
                 };
                 for event in parse_stream_frame(&value) {
+                    trace!(event = ?event, "parsed event");
                     if tx.send(event).await.is_err() {
                         exited.store(true, std::sync::atomic::Ordering::Relaxed);
                         return;

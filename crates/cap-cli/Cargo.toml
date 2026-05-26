@@ -17,6 +17,7 @@ cap-rs-orchestrator = { path = "../cap-rs-orchestrator" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "signal"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [[bin]]
 name = "cap"

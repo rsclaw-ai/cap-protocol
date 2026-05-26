@@ -197,6 +197,7 @@ dependencies = [
  "cap-rs-orchestrator",
  "clap",
  "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]
