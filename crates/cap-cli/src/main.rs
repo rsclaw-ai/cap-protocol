@@ -18,6 +18,14 @@ enum ModeArg {
     Hybrid,
 }
 
+#[derive(Debug, Subcommand)]
+enum ManifestCommand {
+    /// Validate a CAP agent manifest.
+    Validate { path: PathBuf },
+    /// Resolve a CAP agent manifest by name or path.
+    Resolve { name_or_path: String },
+}
+
 impl std::fmt::Display for ModeArg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -50,6 +58,11 @@ enum Command {
     ListDrivers,
     /// Generate a default fleet.yaml template in the current directory.
     Init,
+    /// Validate and resolve CAP agent manifests.
+    Manifest {
+        #[command(subcommand)]
+        command: ManifestCommand,
+    },
     /// Interactive chat with one or more agents.
     Chat {
         /// Path to the fleet.yaml file (optional — auto-creates a single-agent
@@ -99,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Validate { path } => cmd_validate(path),
         Command::ListDrivers => cmd_list_drivers(),
         Command::Init => cmd_init(),
+        Command::Manifest { command } => cmd_manifest(command),
         Command::Chat {
             path,
             task,
@@ -114,6 +128,37 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+fn manifest_summary(m: &cap_rs::manifest::AgentManifest) -> String {
+    format!(
+        "{} {} {:?}",
+        m.agent.name,
+        m.agent.binary,
+        m.binding_preferences()
+    )
+}
+
+fn cmd_manifest(command: ManifestCommand) -> anyhow::Result<()> {
+    match command {
+        ManifestCommand::Validate { path } => {
+            let manifest = cap_rs::manifest::AgentManifest::from_path(&path)
+                .map_err(|e| anyhow::anyhow!("manifest validation error: {e}"))?;
+            println!("✓ {} is valid", path.display());
+            println!("  {}", manifest_summary(&manifest));
+            Ok(())
+        }
+        ManifestCommand::Resolve { name_or_path } => {
+            let manifest = if std::path::Path::new(&name_or_path).exists() {
+                cap_rs::manifest::AgentManifest::from_path(&name_or_path)
+            } else {
+                cap_rs::manifest::AgentManifest::discover_by_name(&name_or_path)
+            }
+            .map_err(|e| anyhow::anyhow!("manifest resolve error: {e}"))?;
+            println!("{}", manifest_summary(&manifest));
+            Ok(())
+        }
+    }
+}
+
 fn cmd_validate(path: PathBuf) -> anyhow::Result<()> {
     let yaml = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
@@ -124,7 +169,7 @@ fn cmd_validate(path: PathBuf) -> anyhow::Result<()> {
     let task = spec.fleet.task.as_deref().unwrap_or("(none)");
     println!("  sessions: {}", spec.fleet.sessions.len());
     for (id, s) in &spec.fleet.sessions {
-        println!("    {id}: {:?}", s.driver);
+        println!("    {id}: {}", s.descriptor());
     }
     println!("  task: {task}");
     println!("  routes: {}", spec.fleet.routes.len());
@@ -180,14 +225,16 @@ async fn cmd_chat(
         let task = task
             .or_else(|| spec.fleet.task.clone())
             .ok_or_else(|| anyhow::anyhow!("no task: pass --task or set fleet.task"))?;
-        let repo = p.parent().map(|p| {
-            if p.as_os_str().is_empty() {
-                std::env::current_dir().unwrap_or_default()
-            } else {
-                p.to_path_buf()
-            }
-        })
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let repo = p
+            .parent()
+            .map(|p| {
+                if p.as_os_str().is_empty() {
+                    std::env::current_dir().unwrap_or_default()
+                } else {
+                    p.to_path_buf()
+                }
+            })
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         (spec, task, repo)
     } else {
         // Auto-create a single-agent fleet.yaml
@@ -308,7 +355,7 @@ async fn cmd_chat(
                         }
                         "/agents" | "/a" => {
                             for (id, s) in &sessions {
-                                println!("  \x1b[1m{id}\x1b[0m — {:?}", s.driver);
+                                println!("  \x1b[1m{id}\x1b[0m — {}", s.descriptor());
                             }
                         }
                         _ => {

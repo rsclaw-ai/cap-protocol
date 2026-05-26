@@ -137,11 +137,13 @@ impl ClaudeCodeDriver {
         } = b;
 
         let bin = if is_opencode {
-            std::env::var("OPENCODE_BIN").ok()
+            std::env::var("OPENCODE_BIN")
+                .ok()
                 .or(bin)
                 .unwrap_or_else(|| "opencode".to_string())
         } else {
-            std::env::var("CLAUDE_BIN").ok()
+            std::env::var("CLAUDE_BIN")
+                .ok()
                 .or(bin)
                 .unwrap_or_else(|| "claude".to_string())
         };
@@ -249,34 +251,10 @@ impl ClaudeCodeDriver {
         // Stderr drain — log only, don't surface as events.
         tokio::spawn(stderr_drain(stderr));
 
-        // Child waiter: capture exit status when the process exits naturally.
-        let exit_status_clone = std::sync::Arc::clone(&exit_status);
-        tokio::spawn(async move {
-            let status = child.wait().await;
-            let mut slot = exit_status_clone.lock().expect("exit_status mutex poisoned");
-            if slot.is_none() {
-                *slot = Some(match status {
-                    Ok(s) => {
-                        if let Some(code) = s.code() {
-                            debug!(exit_code = code, "agent process exited");
-                            DriverExitStatus::Exited { code: Some(code) }
-                        } else {
-                            debug!("agent process killed by signal");
-                            DriverExitStatus::Killed
-                        }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "failed to wait for agent process");
-                        DriverExitStatus::Disconnected
-                    }
-                });
-            }
-        });
-
         Ok(Self {
             writer_tx: Some(writer_tx),
             reader_rx,
-            child: None, // Child is now owned by the waiter task
+            child: Some(child),
             exited,
             exit_status,
         })
@@ -394,6 +372,9 @@ impl Driver for ClaudeCodeDriver {
     async fn send(&mut self, frame: ClientFrame) -> Result<(), DriverError> {
         let tx = self.writer_tx.as_ref().ok_or(DriverError::AgentExited)?;
         let line = encode_client_frame(&frame)?;
+        if line.is_empty() {
+            return Ok(());
+        }
         trace!(line = %line, "→ agent");
         tx.send(line).await.map_err(|_| DriverError::AgentExited)?;
         Ok(())
@@ -464,14 +445,7 @@ async fn reader_task(
         match lines.next_line().await {
             Ok(Some(line)) => {
                 trace!(line = %line, "← claude");
-                let value: Value = match serde_json::from_str(&line) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!(error = %e, raw = %line, "reader: malformed JSON, skipping");
-                        continue;
-                    }
-                };
-                for event in parse_stream_frame(&value) {
+                for event in parse_stream_line(&line, false) {
                     trace!(event = ?event, "parsed event");
                     if tx.send(event).await.is_err() {
                         exited.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -547,17 +521,7 @@ fn encode_client_frame(frame: &ClientFrame) -> Result<String, DriverError> {
                 message: "stream-json binding has no in-band cancel; call Driver::shutdown".into(),
             })
         }
-        ClientFrame::SessionConfig(_) => {
-            // The stream-json driver consumes SessionConfig via the builder
-            // at spawn time; an in-band frame after the session is running
-            // has no equivalent on the Claude SDK wire. Surface explicitly.
-            Err(DriverError::AgentError {
-                code: "cap_session_config_inline_unsupported".into(),
-                message:
-                    "stream-json builder consumes SessionConfig at spawn — re-spawn to change it"
-                        .into(),
-            })
-        }
+        ClientFrame::SessionConfig(_) => Ok(String::new()),
         ClientFrame::AskUserAnswer { ask_id, value } => {
             // Map to a text continuation. Claude doesn't have a native
             // structured-answer protocol, so we serialize the value.
@@ -590,6 +554,25 @@ fn encode_client_frame(frame: &ClientFrame) -> Result<String, DriverError> {
 }
 
 /// Parse one Claude stream-json frame into zero or more CAP events.
+fn parse_stream_line(line: &str, strict: bool) -> Vec<AgentEvent> {
+    match serde_json::from_str::<Value>(line) {
+        Ok(value) => parse_stream_frame(&value),
+        Err(e) => {
+            warn!(error = %e, raw = %line, "reader: malformed JSON");
+            if strict {
+                vec![AgentEvent::Error {
+                    code: "parse_failed".into(),
+                    message: e.to_string(),
+                    retryable: false,
+                    details: Some(json!({ "raw": line })),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
 fn parse_stream_frame(frame: &Value) -> Vec<AgentEvent> {
     let kind = frame.get("type").and_then(Value::as_str).unwrap_or("");
     match kind {
@@ -699,6 +682,10 @@ fn parse_stream_frame(frame: &Value) -> Vec<AgentEvent> {
                         call_id,
                         output,
                         is_error,
+                        duration: block
+                            .get("duration_ms")
+                            .and_then(Value::as_u64)
+                            .map(std::time::Duration::from_millis),
                     });
                 }
             }
@@ -799,7 +786,13 @@ fn parse_usage(frame: &Value) -> Usage {
             .get("cache_creation_input_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0),
-        thinking_tokens: 0,
+        thinking_tokens: u
+            .get("thinking_tokens")
+            .or_else(|| u.get("reasoning_output_tokens"))
+            .or_else(|| frame.get("thinking_tokens"))
+            .or_else(|| frame.get("reasoning_output_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
         cost_usd_estimate: frame.get("total_cost_usd").and_then(Value::as_f64),
         duration: frame
             .get("duration_ms")
@@ -875,7 +868,7 @@ mod tests {
     fn parse_result_with_usage() {
         let v: Value = serde_json::from_str(
             r#"{"type":"result","subtype":"success","duration_ms":1500,"total_cost_usd":0.0021,
-                "usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#,
+                "usage":{"input_tokens":10,"output_tokens":20,"thinking_tokens":3,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#,
         )
         .unwrap();
         let events = parse_stream_frame(&v);
@@ -884,6 +877,7 @@ mod tests {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
                 assert_eq!(usage.input_tokens, 10);
                 assert_eq!(usage.output_tokens, 20);
+                assert_eq!(usage.thinking_tokens, 3);
                 assert_eq!(usage.cost_usd_estimate, Some(0.0021));
             }
             other => panic!("wrong: {other:?}"),
@@ -967,5 +961,20 @@ mod tests {
         .unwrap();
         let events = parse_stream_frame(&v);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn strict_parse_line_emits_parse_failed_error_for_malformed_json() {
+        let events = parse_stream_line("{not json", true);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            AgentEvent::Error {
+                code, retryable, ..
+            } => {
+                assert_eq!(code, "parse_failed");
+                assert!(!retryable);
+            }
+            other => panic!("expected parse_failed error, got {other:?}"),
+        }
     }
 }

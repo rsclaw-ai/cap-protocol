@@ -30,11 +30,11 @@ async fn main() -> anyhow::Result<()> {
 
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut resume: Option<String> = None;
-    if let Some(pos) = args.iter().position(|a| a == "--resume") {
-        if pos + 1 < args.len() {
-            resume = Some(args.remove(pos + 1));
-            args.remove(pos);
-        }
+    if let Some(pos) = args.iter().position(|a| a == "--resume")
+        && pos + 1 < args.len()
+    {
+        resume = Some(args.remove(pos + 1));
+        args.remove(pos);
     }
     let prompt = if args.is_empty() {
         "what is 2 + 2? answer in one short sentence".to_string()

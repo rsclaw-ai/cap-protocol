@@ -226,6 +226,7 @@ fn translate_server_message(msg: ServerMessage) -> Result<Option<AgentEvent>, Dr
             call_id: result.tool_use_id,
             output: result.output,
             is_error: result.is_error,
+            duration: None,
         })),
         Some(Event::ActionRequired(action)) => Ok(Some(AgentEvent::PermissionRequest {
             req_id: action.prompt_id,

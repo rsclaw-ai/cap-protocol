@@ -47,7 +47,8 @@ pub enum RouteDecision {
 
 /// Pluggable routing strategy.
 ///
-/// Each time a session completes, the executor calls [`on_session_done`] and
+/// Each time a session completes, the executor calls
+/// [`RoutingStrategy::on_session_done`] and
 /// carries out the returned decisions (spawning target sessions, routing frames,
 /// emitting `OrchestratorEvent`s).
 #[async_trait::async_trait]
@@ -648,10 +649,10 @@ fn extract_json(text: &str) -> Option<&str> {
 fn build_payload(ctx: &RoutingContext, triggers: &[SessionId]) -> String {
     let mut parts = Vec::new();
     for t in triggers {
-        if let Some(buf) = ctx.buffers.get(t) {
-            if !buf.is_empty() {
-                parts.push(format!("--- output from {t} ---\n{buf}"));
-            }
+        if let Some(buf) = ctx.buffers.get(t)
+            && !buf.is_empty()
+        {
+            parts.push(format!("--- output from {t} ---\n{buf}"));
         }
     }
     if parts.is_empty() {
@@ -872,7 +873,7 @@ mod tests {
             failed: &HashSet::new(),
             spawned: &HashSet::new(),
             buffers: &buffers,
-            task: &"write code",
+            task: "write code",
         };
         let sessions = vec![
             LlmSessionSpec {
@@ -916,7 +917,7 @@ mod tests {
             failed: &HashSet::new(),
             spawned: &HashSet::new(),
             buffers: &HashMap::new(),
-            task: &"write code",
+            task: "write code",
         };
 
         let decisions = strategy
@@ -939,8 +940,10 @@ mod tests {
             id: "x".into(),
             role: None,
         }];
-        let mut config = LlmRoutingConfig::default();
-        config.timeout = Duration::from_nanos(1); // immediate timeout
+        let config = LlmRoutingConfig {
+            timeout: Duration::from_nanos(1),
+            ..LlmRoutingConfig::default()
+        };
         let strategy = LlmRouting::new(client, sessions, config);
 
         let mut done = HashSet::new();
@@ -954,7 +957,7 @@ mod tests {
             failed: &HashSet::new(),
             spawned: &HashSet::new(),
             buffers: &HashMap::new(),
-            task: &"test",
+            task: "test",
         };
         let decisions = strategy
             .on_session_done(&ctx, &"x".into(), StopReason::EndTurn)
@@ -997,7 +1000,7 @@ mod tests {
             failed: &failed,
             spawned: &spawned,
             buffers: &HashMap::new(),
-            task: &"test",
+            task: "test",
         };
         let summaries = SessionSummary::build_all(&ctx, 100);
         assert_eq!(summaries.len(), 3);
@@ -1023,7 +1026,7 @@ mod tests {
             failed: &failed,
             spawned: &spawned,
             buffers: &HashMap::new(),
-            task: &"test",
+            task: "test",
         };
         let summaries = SessionSummary::build_all(&ctx, 100);
         let get = |id: &str| summaries.iter().find(|s| s.id == id).unwrap();
@@ -1062,9 +1065,7 @@ mod tests {
         let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
         assert_eq!(decisions.len(), 1);
         match &decisions[0] {
-            RouteDecision::DynamicRoute {
-                target, driver, ..
-            } => {
+            RouteDecision::DynamicRoute { target, driver, .. } => {
                 assert_eq!(target, "remote");
                 assert_eq!(*driver, DriverKind::Grpc("localhost:50051".into()));
             }
@@ -1077,7 +1078,9 @@ mod tests {
         let json = r#"{"actions": [{"type": "route", "target": "spy", "driver": "nonexistent", "context": "x"}], "reasoning": "bad"}"#;
         let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
         assert_eq!(decisions.len(), 1);
-        assert!(matches!(&decisions[0], RouteDecision::Error(msg) if msg.contains("unknown driver")));
+        assert!(
+            matches!(&decisions[0], RouteDecision::Error(msg) if msg.contains("unknown driver"))
+        );
     }
 
     #[test]
@@ -1099,13 +1102,19 @@ mod tests {
             collect: None,
         }];
         let client = Box::new(StubLlmClient::new(vec![
-            r#"{"actions": [{"type": "complete"}], "reasoning": "should not be called"}"#.into(),
+            r#"{"actions": [{"type": "complete"}], "reasoning": "should not be called"}"#,
         ]));
         let llm = LlmRouting::new(
             client,
             vec![
-                LlmSessionSpec { id: "coder".into(), role: None },
-                LlmSessionSpec { id: "reviewer".into(), role: None },
+                LlmSessionSpec {
+                    id: "coder".into(),
+                    role: None,
+                },
+                LlmSessionSpec {
+                    id: "reviewer".into(),
+                    role: None,
+                },
             ],
             LlmRoutingConfig::default(),
         );
@@ -1126,13 +1135,17 @@ mod tests {
             failed: &HashSet::new(),
             spawned: &spawned,
             buffers: &buffers,
-            task: &"build it",
+            task: "build it",
         };
 
-        let decisions = hybrid.on_session_done(&ctx, &"coder".into(), StopReason::EndTurn).await;
+        let decisions = hybrid
+            .on_session_done(&ctx, &"coder".into(), StopReason::EndTurn)
+            .await;
         // Static route should match before LLM is consulted
         assert_eq!(decisions.len(), 1);
-        assert!(matches!(&decisions[0], RouteDecision::Route { target, .. } if target == "reviewer"));
+        assert!(
+            matches!(&decisions[0], RouteDecision::Route { target, .. } if target == "reviewer")
+        );
     }
 
     #[tokio::test]
@@ -1145,13 +1158,19 @@ mod tests {
             collect: None,
         }];
         let client = Box::new(StubLlmClient::new(vec![
-            r#"{"actions": [{"type": "route", "target": "reviewer", "context": "review this"}], "reasoning": "llm decision"}"#.into(),
+            r#"{"actions": [{"type": "route", "target": "reviewer", "context": "review this"}], "reasoning": "llm decision"}"#,
         ]));
         let llm = LlmRouting::new(
             client,
             vec![
-                LlmSessionSpec { id: "coder".into(), role: None },
-                LlmSessionSpec { id: "reviewer".into(), role: None },
+                LlmSessionSpec {
+                    id: "coder".into(),
+                    role: None,
+                },
+                LlmSessionSpec {
+                    id: "reviewer".into(),
+                    role: None,
+                },
             ],
             LlmRoutingConfig::default(),
         );
@@ -1172,12 +1191,16 @@ mod tests {
             failed: &HashSet::new(),
             spawned: &spawned,
             buffers: &buffers,
-            task: &"build it",
+            task: "build it",
         };
 
-        let decisions = hybrid.on_session_done(&ctx, &"coder".into(), StopReason::EndTurn).await;
+        let decisions = hybrid
+            .on_session_done(&ctx, &"coder".into(), StopReason::EndTurn)
+            .await;
         assert_eq!(decisions.len(), 1);
-        assert!(matches!(&decisions[0], RouteDecision::Route { target, .. } if target == "reviewer"));
+        assert!(
+            matches!(&decisions[0], RouteDecision::Route { target, .. } if target == "reviewer")
+        );
     }
 
     #[tokio::test]
@@ -1192,11 +1215,14 @@ mod tests {
             collect: None,
         }];
         let client = Box::new(StubLlmClient::new(vec![
-            r#"{"actions": [{"type": "complete"}], "reasoning": "should not be called"}"#.into(),
+            r#"{"actions": [{"type": "complete"}], "reasoning": "should not be called"}"#,
         ]));
         let llm = LlmRouting::new(
             client,
-            vec![LlmSessionSpec { id: "lead".into(), role: None }],
+            vec![LlmSessionSpec {
+                id: "lead".into(),
+                role: None,
+            }],
             LlmRoutingConfig::default(),
         );
         let hybrid = HybridRouting::new(routes, llm);
@@ -1214,10 +1240,12 @@ mod tests {
             failed: &HashSet::new(),
             spawned: &spawned,
             buffers: &HashMap::new(),
-            task: &"parallel work",
+            task: "parallel work",
         };
 
-        let decisions = hybrid.on_session_done(&ctx, &"lead".into(), StopReason::EndTurn).await;
+        let decisions = hybrid
+            .on_session_done(&ctx, &"lead".into(), StopReason::EndTurn)
+            .await;
         assert_eq!(decisions.len(), 1);
         assert!(matches!(&decisions[0], RouteDecision::FanOut { targets } if targets.len() == 2));
     }

@@ -48,7 +48,7 @@ impl SessionRegistry {
                 return Err(e);
             }
         };
-        let handle = spawn_session(id.clone(), driver, policy, bus.clone(), cancel.clone());
+        let handle = spawn_session(id.clone(), driver, policy, cwd, bus.clone(), cancel.clone());
         self.sessions.insert(id, handle);
         Ok(())
     }

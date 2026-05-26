@@ -88,6 +88,9 @@ impl Driver for CodexExecDriver {
     async fn send(&mut self, frame: ClientFrame) -> Result<(), DriverError> {
         // codex exec is one-shot — the only input is the prompt passed at
         // spawn-time. Multi-turn means a fresh spawn with .resume(thread_id).
+        if matches!(frame, ClientFrame::SessionConfig(_)) {
+            return Ok(());
+        }
         let code = match &frame {
             ClientFrame::Cancel { .. } => "cap_cancel_unsupported",
             _ => "cap_queued_input_unsupported",
@@ -495,6 +498,11 @@ async fn parse_codex_frame(
                             call_id: item_id,
                             output,
                             is_error,
+                            duration: item
+                                .get("duration_ms")
+                                .or_else(|| item.get("durationMs"))
+                                .and_then(Value::as_u64)
+                                .map(std::time::Duration::from_millis),
                         }]
                     } else {
                         Vec::new()
@@ -527,6 +535,11 @@ async fn parse_codex_frame(
                             call_id: item_id,
                             output,
                             is_error: false,
+                            duration: item
+                                .get("duration_ms")
+                                .or_else(|| item.get("durationMs"))
+                                .and_then(Value::as_u64)
+                                .map(std::time::Duration::from_millis),
                         }]
                     } else {
                         Vec::new()

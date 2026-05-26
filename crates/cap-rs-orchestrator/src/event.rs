@@ -69,10 +69,7 @@ pub enum OrchestratorControl {
     /// Answer to an [`OrchestratorEvent::AwaitSelection`].
     Select { session: SessionId },
     /// Inject a user message into a running session's inbox.
-    UserMessage {
-        session: SessionId,
-        text: String,
-    },
+    UserMessage { session: SessionId, text: String },
     /// Hard-cancel the whole fleet.
     Cancel,
 }

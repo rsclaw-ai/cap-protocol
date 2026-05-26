@@ -40,6 +40,8 @@
 
 pub mod core;
 pub mod driver;
+pub mod manifest;
+pub mod wire;
 
 /// Crate name (build-time constant).
 pub const CRATE_NAME: &str = env!("CARGO_PKG_NAME");

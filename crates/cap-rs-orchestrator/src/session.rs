@@ -1,7 +1,11 @@
 //! One tokio task per session, owning a `Box<dyn Driver>`. Communicates only
 //! over channels — no shared mutable state, no `Mutex<Driver>`.
 
-use cap_rs::core::{AgentEvent, ClientFrame, PermissionDecision, ReverseRpcResult};
+use std::path::PathBuf;
+
+use cap_rs::core::{
+    AgentEvent, ClientFrame, PermissionDecision, PermissionMode, ReverseRpcResult, SessionConfig,
+};
 use cap_rs::driver::Driver;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -23,6 +27,7 @@ pub fn spawn_session(
     id: SessionId,
     mut driver: Box<dyn Driver>,
     policy: PermissionPolicy,
+    cwd: PathBuf,
     bus: mpsc::Sender<OrchestratorEvent>,
     cancel: CancellationToken,
 ) -> SessionHandle {
@@ -38,7 +43,9 @@ pub fn spawn_session(
         )
         .await;
 
-        // Wait for the first (and only) frame to drive the turn.
+        // Wait for the first frame to drive the turn. This is the task prompt
+        // supplied by the orchestrator; CAP session config is synthesized from
+        // the session actor's launch context and sent first.
         let frame = tokio::select! {
             biased;
             _ = cancel.cancelled() => { let _ = driver.shutdown().await; return; }
@@ -47,6 +54,27 @@ pub fn spawn_session(
                 None => { let _ = driver.shutdown().await; return; }
             }
         };
+
+        let permission_mode = match policy {
+            PermissionPolicy::Ask => PermissionMode::Interactive,
+            PermissionPolicy::Allow | PermissionPolicy::Bypass => PermissionMode::Confirm,
+            PermissionPolicy::Deny => PermissionMode::None,
+        };
+        let mut config = SessionConfig::new(cwd);
+        config.permission_mode = permission_mode;
+        if let Err(e) = driver.send(ClientFrame::SessionConfig(config)).await {
+            tracing::error!(session = %id, error = %e, "failed to send session config");
+            bus_send(
+                &bus,
+                OrchestratorEvent::SessionFailed {
+                    session: id.clone(),
+                    error: e.to_string(),
+                },
+                &cancel,
+            )
+            .await;
+            return;
+        }
 
         // PTY/TUI agents need to boot to their input prompt before they can
         // receive a prompt — sending earlier loses it into a not-ready
@@ -140,10 +168,46 @@ async fn pump_turn(
 ) {
     loop {
         tracing::debug!(session = %id, "waiting for next event");
-        let ev = tokio::select! {
+        enum PumpInput {
+            Cancelled,
+            DriverEvent(Option<AgentEvent>),
+            Inbox(Option<ClientFrame>),
+        }
+        let input = tokio::select! {
             biased;
-            _ = cancel.cancelled() => { let _ = driver.shutdown().await; return; }
-            ev = driver.next_event() => ev,
+            _ = cancel.cancelled() => PumpInput::Cancelled,
+            frame = inbox_rx.recv() => PumpInput::Inbox(frame),
+            ev = driver.next_event() => PumpInput::DriverEvent(ev),
+        };
+
+        let ev = match input {
+            PumpInput::Cancelled => {
+                let _ = driver.shutdown().await;
+                return;
+            }
+            PumpInput::Inbox(Some(frame)) => {
+                if let ClientFrame::SessionConfig(_) = frame {
+                    continue;
+                }
+                if let Err(e) = driver.send(frame).await {
+                    bus_send(
+                        bus,
+                        OrchestratorEvent::SessionFailed {
+                            session: id.clone(),
+                            error: e.to_string(),
+                        },
+                        cancel,
+                    )
+                    .await;
+                    return;
+                }
+                continue;
+            }
+            PumpInput::Inbox(None) => {
+                let _ = driver.shutdown().await;
+                return;
+            }
+            PumpInput::DriverEvent(ev) => ev,
         };
 
         let Some(ev) = ev else {
@@ -196,11 +260,13 @@ async fn pump_turn(
                 .await;
 
                 let decision = match policy {
-                    PermissionPolicy::Allow | PermissionPolicy::Bypass => {
+                    PermissionPolicy::Allow | PermissionPolicy::Bypass
+                        if risk_level != cap_rs::core::RiskLevel::High =>
+                    {
                         PermissionDecision::AllowOnce
                     }
                     PermissionPolicy::Deny => PermissionDecision::Deny,
-                    PermissionPolicy::Ask => {
+                    PermissionPolicy::Ask | PermissionPolicy::Allow | PermissionPolicy::Bypass => {
                         bus_send(
                             bus,
                             OrchestratorEvent::Ask {
@@ -313,12 +379,23 @@ mod tests {
         }
     }
 
+    fn test_cwd() -> std::path::PathBuf {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    }
+
     #[tokio::test]
     async fn pumps_events_and_signals_done() {
         let driver = Box::new(StubDriver::new("a").text("hi").done(StopReason::EndTurn));
         let (bus_tx, mut bus_rx) = mpsc::channel(64);
         let token = CancellationToken::new();
-        let handle = spawn_session("a".into(), driver, PermissionPolicy::Allow, bus_tx, token);
+        let handle = spawn_session(
+            "a".into(),
+            driver,
+            PermissionPolicy::Allow,
+            test_cwd(),
+            bus_tx,
+            token,
+        );
 
         handle.inbox.send(prompt("go")).await.unwrap();
 
@@ -355,7 +432,14 @@ mod tests {
         );
         let (bus_tx, mut bus_rx) = mpsc::channel(64);
         let token = CancellationToken::new();
-        let handle = spawn_session("a".into(), driver, PermissionPolicy::Allow, bus_tx, token);
+        let handle = spawn_session(
+            "a".into(),
+            driver,
+            PermissionPolicy::Allow,
+            test_cwd(),
+            bus_tx,
+            token,
+        );
         handle.inbox.send(prompt("go")).await.unwrap();
 
         let mut done = false;
@@ -375,13 +459,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sends_session_config_before_prompt() {
+        let frame_kinds = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let driver = Box::new(
+            StubDriver::new("a")
+                .ready()
+                .done(StopReason::EndTurn)
+                .capture_frame_kinds(frame_kinds.clone()),
+        );
+        let (bus_tx, mut bus_rx) = mpsc::channel(64);
+        let token = CancellationToken::new();
+        let handle = spawn_session(
+            "a".into(),
+            driver,
+            PermissionPolicy::Allow,
+            test_cwd(),
+            bus_tx,
+            token,
+        );
+        handle.inbox.send(prompt("go")).await.unwrap();
+
+        while let Some(ev) = bus_rx.recv().await {
+            if let OrchestratorEvent::SessionDone { .. } = ev {
+                break;
+            }
+        }
+
+        assert_eq!(
+            *frame_kinds.lock().unwrap(),
+            vec!["SessionConfig", "Prompt"]
+        );
+        handle.join.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn await_ready_driver_fails_if_never_ready() {
         // No Ready is ever scripted; the driver exits while we wait → fail loud
         // rather than send a prompt into a not-ready agent or hang forever.
         let driver = Box::new(StubDriver::new("a").await_ready().text("noise"));
         let (bus_tx, mut bus_rx) = mpsc::channel(64);
         let token = CancellationToken::new();
-        let handle = spawn_session("a".into(), driver, PermissionPolicy::Allow, bus_tx, token);
+        let handle = spawn_session(
+            "a".into(),
+            driver,
+            PermissionPolicy::Allow,
+            test_cwd(),
+            bus_tx,
+            token,
+        );
         handle.inbox.send(prompt("go")).await.unwrap();
 
         let mut failed = false;
@@ -408,7 +533,14 @@ mod tests {
         );
         let (bus_tx, mut bus_rx) = mpsc::channel(64);
         let token = CancellationToken::new();
-        let handle = spawn_session("a".into(), driver, PermissionPolicy::Allow, bus_tx, token);
+        let handle = spawn_session(
+            "a".into(),
+            driver,
+            PermissionPolicy::Allow,
+            test_cwd(),
+            bus_tx,
+            token,
+        );
         handle.inbox.send(prompt("go")).await.unwrap();
 
         let mut saw_ask = false;
@@ -423,6 +555,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn high_risk_is_not_auto_approved() {
+        let driver = Box::new(
+            StubDriver::new("a")
+                .permission("Bash", RiskLevel::High)
+                .done(StopReason::EndTurn),
+        );
+        let (bus_tx, mut bus_rx) = mpsc::channel(64);
+        let token = CancellationToken::new();
+        let handle = spawn_session(
+            "a".into(),
+            driver,
+            PermissionPolicy::Allow,
+            test_cwd(),
+            bus_tx,
+            token,
+        );
+        handle.inbox.send(prompt("go")).await.unwrap();
+
+        let mut saw_ask = false;
+        loop {
+            match bus_rx.recv().await.unwrap() {
+                OrchestratorEvent::Ask {
+                    req_id, risk_level, ..
+                } => {
+                    assert_eq!(risk_level, RiskLevel::High);
+                    saw_ask = true;
+                    handle
+                        .inbox
+                        .send(ClientFrame::PermissionResponse {
+                            req_id,
+                            decision: PermissionDecision::Deny,
+                        })
+                        .await
+                        .unwrap();
+                }
+                OrchestratorEvent::SessionDone { .. } => break,
+                _ => {}
+            }
+        }
+        assert!(saw_ask, "high-risk permission must ask even under Allow");
+    }
+
+    #[tokio::test]
     async fn ask_policy_surfaces_ask_and_awaits_decision() {
         let driver = Box::new(
             StubDriver::new("a")
@@ -431,7 +606,14 @@ mod tests {
         );
         let (bus_tx, mut bus_rx) = mpsc::channel(64);
         let token = CancellationToken::new();
-        let handle = spawn_session("a".into(), driver, PermissionPolicy::Ask, bus_tx, token);
+        let handle = spawn_session(
+            "a".into(),
+            driver,
+            PermissionPolicy::Ask,
+            test_cwd(),
+            bus_tx,
+            token,
+        );
         handle.inbox.send(prompt("go")).await.unwrap();
 
         loop {
@@ -455,5 +637,41 @@ mod tests {
             }
         }
         assert!(saw_done);
+    }
+
+    #[tokio::test]
+    async fn mid_turn_user_message_is_forwarded() {
+        let frame_kinds = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let driver = Box::new(
+            StubDriver::new("a")
+                .delay_events(std::time::Duration::from_millis(100))
+                .done(StopReason::EndTurn)
+                .capture_frame_kinds(frame_kinds.clone()),
+        );
+        let (bus_tx, mut bus_rx) = mpsc::channel(64);
+        let token = CancellationToken::new();
+        let handle = spawn_session(
+            "a".into(),
+            driver,
+            PermissionPolicy::Allow,
+            test_cwd(),
+            bus_tx,
+            token,
+        );
+        handle.inbox.send(prompt("first")).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        handle.inbox.send(prompt("second")).await.unwrap();
+
+        while let Some(ev) = bus_rx.recv().await {
+            if let OrchestratorEvent::SessionDone { .. } = ev {
+                break;
+            }
+        }
+
+        assert_eq!(
+            *frame_kinds.lock().unwrap(),
+            vec!["SessionConfig", "Prompt", "Prompt"]
+        );
+        handle.join.await.unwrap();
     }
 }

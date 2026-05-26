@@ -25,8 +25,9 @@ pub mod acp;
 #[cfg(feature = "grpc")]
 pub mod grpc;
 
+#[cfg(feature = "a2a")]
+pub mod a2a;
 // Future modules — gated on their respective features:
-// #[cfg(feature = "a2a")]          pub mod a2a;
 // #[cfg(feature = "orchestrator")] pub mod orchestrator;
 
 // The Driver trait and DriverError are shared across all driver backends.

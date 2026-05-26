@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use cap_rs::core::{
@@ -26,9 +27,11 @@ pub struct StubDriver {
     alive: bool,
     last_decision: Option<cap_rs::core::PermissionDecision>,
     captured: Option<Arc<Mutex<Vec<String>>>>,
+    captured_frame_kinds: Option<Arc<Mutex<Vec<&'static str>>>>,
     /// Mirrors `Driver::prompt_after_ready` — makes the actor wait for a
     /// scripted `Ready` before sending the prompt.
     await_ready: bool,
+    event_delay: Option<Duration>,
 }
 
 impl StubDriver {
@@ -39,7 +42,9 @@ impl StubDriver {
             alive: true,
             last_decision: None,
             captured: None,
+            captured_frame_kinds: None,
             await_ready: false,
+            event_delay: None,
         }
     }
 
@@ -88,9 +93,27 @@ impl StubDriver {
         self
     }
 
+    pub fn usage_cost(mut self, cost: f64) -> Self {
+        let mut usage = Usage::default();
+        usage.cost_usd_estimate = Some(cost);
+        self.queue.push_back(AgentEvent::Usage { usage });
+        self
+    }
+
     /// Record the text of every Prompt frame this driver receives, for assertions.
     pub fn capture(mut self, sink: Arc<Mutex<Vec<String>>>) -> Self {
         self.captured = Some(sink);
+        self
+    }
+
+    /// Record the kind of every frame received via `send()`.
+    pub fn capture_frame_kinds(mut self, sink: Arc<Mutex<Vec<&'static str>>>) -> Self {
+        self.captured_frame_kinds = Some(sink);
+        self
+    }
+
+    pub fn delay_events(mut self, duration: Duration) -> Self {
+        self.event_delay = Some(duration);
         self
     }
 
@@ -103,6 +126,18 @@ impl StubDriver {
 #[async_trait::async_trait]
 impl Driver for StubDriver {
     async fn send(&mut self, frame: ClientFrame) -> Result<(), DriverError> {
+        if let Some(sink) = &self.captured_frame_kinds {
+            let kind = match &frame {
+                ClientFrame::SessionConfig(_) => "SessionConfig",
+                ClientFrame::Prompt { .. } => "Prompt",
+                ClientFrame::AskUserAnswer { .. } => "AskUserAnswer",
+                ClientFrame::PermissionResponse { .. } => "PermissionResponse",
+                ClientFrame::Cancel { .. } => "Cancel",
+                ClientFrame::ReverseRpcResult { .. } => "ReverseRpcResult",
+                _ => "Unknown",
+            };
+            sink.lock().expect("frame sink mutex poisoned").push(kind);
+        }
         match frame {
             ClientFrame::PermissionResponse { decision, .. } => {
                 self.last_decision = Some(decision);
@@ -125,6 +160,9 @@ impl Driver for StubDriver {
     }
 
     async fn next_event(&mut self) -> Option<AgentEvent> {
+        if let Some(delay) = self.event_delay.take() {
+            tokio::time::sleep(delay).await;
+        }
         let ev = self.queue.pop_front();
         if ev.is_none() {
             self.alive = false;

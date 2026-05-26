@@ -116,11 +116,7 @@ impl Driver for AcpDriver {
         })?;
 
         match frame {
-            ClientFrame::SessionConfig(_) => Err(DriverError::AgentError {
-                code: "cap_session_config_inline_unsupported".into(),
-                message: "ACP consumes session config at session/new — re-spawn to change it"
-                    .into(),
-            }),
+            ClientFrame::SessionConfig(_) => Ok(()),
 
             ClientFrame::Prompt { content } => {
                 // Fire-and-forget at the JSON-RPC level: the response (carrying
@@ -417,10 +413,8 @@ fn select_option(options: &Value, decision: PermissionDecision) -> Option<String
     };
     let id_of = |o: &Value| o.get("optionId").and_then(Value::as_str).map(String::from);
     // Try an exact-ish kind match first, then fall back to allow/reject family.
-    if prefer_always {
-        if let Some(o) = arr.iter().find(|o| kind_of(o).contains("allow_always")) {
-            return id_of(o);
-        }
+    if prefer_always && let Some(o) = arr.iter().find(|o| kind_of(o).contains("allow_always")) {
+        return id_of(o);
     }
     arr.iter()
         .find(|o| {
@@ -583,11 +577,11 @@ fn handle_response(
     };
 
     // Claimed by a handshake awaiter? Hand it the oneshot and stop.
-    if let Some(id) = id {
-        if let Some(tx) = pending.lock().expect("pending mutex poisoned").remove(&id) {
-            let _ = tx.send(result);
-            return Vec::new();
-        }
+    if let Some(id) = id
+        && let Some(tx) = pending.lock().expect("pending mutex poisoned").remove(&id)
+    {
+        let _ = tx.send(result);
+        return Vec::new();
     }
 
     // Unclaimed response: this is the session/prompt turn result. Map a
@@ -773,6 +767,11 @@ fn parse_notification(method: &str, params: &Value) -> Vec<AgentEvent> {
                 call_id,
                 output: content_text(update.get("content")),
                 is_error: status == "failed",
+                duration: update
+                    .get("duration_ms")
+                    .or_else(|| update.get("durationMs"))
+                    .and_then(Value::as_u64)
+                    .map(std::time::Duration::from_millis),
             }]
         }
         "plan" => {

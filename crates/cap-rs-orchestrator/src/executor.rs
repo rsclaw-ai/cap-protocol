@@ -133,6 +133,7 @@ impl Executor {
                 done: HashSet::new(),
                 spawned: HashSet::new(),
                 failed: HashSet::new(),
+                usage_cost_usd: 0.0,
                 buffers: HashMap::new(),
                 out: out_tx,
                 bus_tx,
@@ -158,6 +159,8 @@ struct Run<F: DriverFactory, W: WorktreeManager> {
     spawned: HashSet<SessionId>,
     /// Sessions that failed (driver crash, or reported SessionFailed).
     failed: HashSet<SessionId>,
+    /// Aggregated reported usage cost across all sessions.
+    usage_cost_usd: f64,
     /// Accumulated assistant text per session, used to parse `by_subtask` blocks.
     buffers: HashMap<SessionId, String>,
     out: mpsc::Sender<OrchestratorEvent>,
@@ -176,7 +179,22 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
 
     async fn spawn(&mut self, id: &SessionId) -> bool {
         let kind = match self.spec.fleet.sessions.get(id) {
-            Some(s) => s.driver.clone(),
+            Some(s) => match s.driver_kind() {
+                Some(k) => k,
+                None => DriverKind::Pty(
+                    s.agent
+                        .clone()
+                        .or_else(|| {
+                            s.manifest.as_ref().and_then(|p| {
+                                std::path::Path::new(p)
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .map(str::to_string)
+                            })
+                        })
+                        .unwrap_or_else(|| id.clone()),
+                ),
+            },
             None => return false,
         };
         let policy = match self.policy_for(id) {
@@ -288,6 +306,32 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                     } = &ev
                     {
                         self.buffers.entry(session.clone()).or_default().push_str(text);
+                    }
+                    if let OrchestratorEvent::Agent {
+                        session,
+                        event: AgentEvent::Usage { usage },
+                    } = &ev
+                        && let Some(cost) = usage.cost_usd_estimate
+                    {
+                        self.usage_cost_usd += cost;
+                        if let Some(limit) = self.spec.fleet.budget_usd
+                            && self.usage_cost_usd > limit
+                        {
+                            self.failed.insert(session.clone());
+                            let _ = self
+                                .out
+                                .send(OrchestratorEvent::SessionFailed {
+                                    session: session.clone(),
+                                    error: format!(
+                                        "budget exceeded: ${:.4} > ${:.4}",
+                                        self.usage_cost_usd, limit
+                                    ),
+                                })
+                                .await;
+                            self.cancel.cancel();
+                            let _ = self.out.send(OrchestratorEvent::FleetComplete).await;
+                            break;
+                        }
                     }
 
                     // Record failed sessions BEFORE checking fleet_complete,
@@ -537,5 +581,52 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
         self.spawned
             .iter()
             .all(|s| self.done.contains(s) || self.failed.contains(s))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::FleetSpec;
+    use crate::testing::{StubDriver, StubDriverFactory};
+    use crate::worktree::NoopWorktreeManager;
+
+    #[tokio::test]
+    async fn budget_exceeded_cancels_fleet() {
+        let spec = FleetSpec::from_yaml(
+            r#"
+fleet:
+  base_branch: main
+  budget_usd: 0.01
+  sessions:
+    a: { driver: claude, permissions: allow }
+  start: a
+"#,
+        )
+        .unwrap();
+        let factory = StubDriverFactory::new().with(
+            "a",
+            StubDriver::new("a")
+                .usage_cost(0.02)
+                .done(cap_rs::core::StopReason::EndTurn),
+        );
+        let (handle, mut events) = Executor::start(spec, factory, NoopWorktreeManager::new(), "go")
+            .await
+            .unwrap();
+
+        let mut saw_budget_failure = false;
+        while let Some(ev) = events.recv().await {
+            match ev {
+                OrchestratorEvent::SessionFailed { error, .. } => {
+                    if error.contains("budget exceeded") {
+                        saw_budget_failure = true;
+                    }
+                }
+                OrchestratorEvent::FleetComplete => break,
+                _ => {}
+            }
+        }
+        handle.cancel();
+        assert!(saw_budget_failure);
     }
 }

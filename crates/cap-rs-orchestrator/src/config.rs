@@ -42,6 +42,9 @@ pub struct Fleet {
     /// Fleet-level permission default; per-session may override.
     #[serde(default)]
     pub permissions: PermissionPolicy,
+    /// Optional total budget for all sessions in the fleet.
+    #[serde(default)]
+    pub budget_usd: Option<f64>,
     /// Routing mode: static (default), llm, or hybrid.
     #[serde(default)]
     pub mode: RoutingMode,
@@ -55,12 +58,90 @@ pub struct Fleet {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionSpec {
-    pub driver: DriverKind,
+    #[serde(default)]
+    pub driver: Option<DriverKind>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub manifest: Option<String>,
     /// `None` means "inherit the fleet-level policy".
     #[serde(default)]
     pub permissions: Option<PermissionPolicy>,
     /// Human-readable role description for LLM-driven orchestration (e.g. "code reviewer").
     pub role: Option<String>,
+}
+
+impl SessionSpec {
+    pub fn driver_kind(&self) -> Option<DriverKind> {
+        self.driver
+            .clone()
+            .or_else(|| self.agent.as_deref().and_then(DriverKind::parse))
+            .or_else(|| self.manifest.as_deref().and_then(driver_kind_from_manifest))
+    }
+
+    pub fn descriptor(&self) -> String {
+        if let Some(driver) = &self.driver {
+            format!("{driver:?}")
+        } else if let Some(agent) = &self.agent {
+            format!("agent:{agent}")
+        } else if let Some(manifest) = &self.manifest {
+            format!("manifest:{manifest}")
+        } else {
+            "unconfigured".into()
+        }
+    }
+}
+
+fn driver_kind_from_manifest(path: &str) -> Option<DriverKind> {
+    use cap_rs::manifest::{AgentManifest, BindingKind};
+
+    let manifest = AgentManifest::from_path(path)
+        .or_else(|_| {
+            AgentManifest::from_path(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("..")
+                    .join(path),
+            )
+        })
+        .ok()?;
+    for binding in manifest.binding_preferences() {
+        match binding {
+            BindingKind::Grpc => {
+                if let Some(url) = manifest.fast_path.grpc.url() {
+                    return Some(DriverKind::Grpc(
+                        url.trim_start_matches("http://").to_string(),
+                    ));
+                }
+                if manifest.agent.name == "openclaude" || manifest.agent.binary == "openclaude" {
+                    return Some(DriverKind::OpenClaude);
+                }
+            }
+            BindingKind::StreamJson => match manifest.agent.name.as_str() {
+                "claude-code" => return Some(DriverKind::Claude),
+                "openclaude" => return Some(DriverKind::OpenClaude),
+                "opencode" => return Some(DriverKind::OpenCode),
+                _ => return Some(DriverKind::Pty(manifest.agent.binary.clone())),
+            },
+            BindingKind::AcpStdio => {
+                return Some(DriverKind::Acp(manifest.agent.binary.clone()));
+            }
+            BindingKind::A2aHttpsSse => {
+                if let Some(url) = manifest.fast_path.a2a_serve_at.url() {
+                    return Some(DriverKind::Pty(url.to_string()));
+                }
+            }
+            BindingKind::Pty => {
+                return manifest
+                    .startup
+                    .command
+                    .first()
+                    .cloned()
+                    .map(DriverKind::Pty);
+            }
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -82,7 +163,7 @@ pub enum DriverKind {
     /// OpenCode via stream-json (Claude Code-compatible NDJSON frames).
     /// Higher fidelity than ACP: token-level deltas, no handshake overhead.
     OpenCode,
-    /// Aider chat via PTY (https://github.com/paul-gauthier/aider).
+    /// Aider chat via PTY (<https://github.com/paul-gauthier/aider>).
     Aider,
     /// Structured Agent Client Protocol agent (e.g. `acp:opencode`).
     Acp(String),
@@ -377,6 +458,30 @@ fn valid_git_ref(r: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
 }
 
+fn validate_agent_name(name: &str) -> Result<(), OrchestratorError> {
+    if valid_binary_name(name) {
+        Ok(())
+    } else {
+        Err(OrchestratorError::Config(format!(
+            "invalid agent name '{name}'"
+        )))
+    }
+}
+
+fn validate_manifest_path(path: &str) -> Result<(), OrchestratorError> {
+    if path.is_empty()
+        || path.starts_with('-')
+        || path.contains('\0')
+        || path.contains("..")
+        || path.contains('\\')
+    {
+        return Err(OrchestratorError::Config(format!(
+            "invalid manifest path '{path}'"
+        )));
+    }
+    Ok(())
+}
+
 impl FleetSpec {
     pub fn from_yaml(s: &str) -> Result<Self, OrchestratorError> {
         serde_yaml::from_str(s).map_err(|e| OrchestratorError::Config(e.to_string()))
@@ -396,6 +501,22 @@ impl FleetSpec {
                 return Err(OrchestratorError::Config(format!(
                     "invalid session id '{id}' (allowed: letters, digits, '_', '-'; no leading '-')"
                 )));
+            }
+        }
+        for (id, session) in &self.fleet.sessions {
+            let configured = session.driver.is_some() as u8
+                + session.agent.is_some() as u8
+                + session.manifest.is_some() as u8;
+            if configured != 1 {
+                return Err(OrchestratorError::Config(format!(
+                    "session '{id}' must set exactly one of driver, agent, or manifest"
+                )));
+            }
+            if let Some(agent) = &session.agent {
+                validate_agent_name(agent)?;
+            }
+            if let Some(manifest) = &session.manifest {
+                validate_manifest_path(manifest)?;
             }
         }
 
@@ -575,6 +696,38 @@ fleet:
     }
 
     #[test]
+    fn parses_manifest_backed_session() {
+        let yaml = r#"
+fleet:
+  base_branch: main
+  sessions:
+    coder: { manifest: examples/claude-code.toml, permissions: allow }
+    reviewer: { agent: codex, permissions: allow }
+  start: coder
+  routes:
+    - { when: coder.done, route_to: reviewer }
+"#;
+        let spec = FleetSpec::from_yaml(yaml).unwrap();
+        assert_eq!(
+            spec.fleet.sessions["coder"].manifest.as_deref(),
+            Some("examples/claude-code.toml")
+        );
+        assert_eq!(
+            spec.fleet.sessions["reviewer"].agent.as_deref(),
+            Some("codex")
+        );
+        assert_eq!(
+            spec.fleet.sessions["coder"].driver_kind(),
+            Some(DriverKind::Claude)
+        );
+        assert_eq!(
+            spec.fleet.sessions["reviewer"].driver_kind(),
+            Some(DriverKind::Codex)
+        );
+        spec.validate().unwrap();
+    }
+
+    #[test]
     fn parses_fan_out_and_join() {
         let yaml = r#"
 fleet:
@@ -650,7 +803,10 @@ fleet:
   start: oc
 "#;
         let spec = FleetSpec::from_yaml(yaml).unwrap();
-        assert_eq!(spec.fleet.sessions["oc"].driver, DriverKind::OpenClaude);
+        assert_eq!(
+            spec.fleet.sessions["oc"].driver,
+            Some(DriverKind::OpenClaude)
+        );
     }
 
     #[test]
@@ -663,7 +819,7 @@ fleet:
   start: oc
 "#;
         let spec = FleetSpec::from_yaml(yaml).unwrap();
-        assert_eq!(spec.fleet.sessions["oc"].driver, DriverKind::OpenCode);
+        assert_eq!(spec.fleet.sessions["oc"].driver, Some(DriverKind::OpenCode));
     }
 
     #[test]
@@ -678,7 +834,7 @@ fleet:
         let spec = FleetSpec::from_yaml(yaml).unwrap();
         assert_eq!(
             spec.fleet.sessions["oc"].driver,
-            DriverKind::Pty("opencode".into())
+            Some(DriverKind::Pty("opencode".into()))
         );
     }
 
@@ -835,7 +991,7 @@ fleet:
         let spec = FleetSpec::from_yaml(yaml).unwrap();
         assert_eq!(
             spec.fleet.sessions["agent"].driver,
-            DriverKind::Grpc("localhost:50051".into())
+            Some(DriverKind::Grpc("localhost:50051".into()))
         );
         spec.validate().unwrap();
     }
@@ -869,7 +1025,7 @@ fleet:
         let spec = FleetSpec::from_yaml(yaml).unwrap();
         assert_eq!(
             spec.fleet.sessions["agent"].driver,
-            DriverKind::Grpc("127.0.0.1:8080".into())
+            Some(DriverKind::Grpc("127.0.0.1:8080".into()))
         );
     }
 }

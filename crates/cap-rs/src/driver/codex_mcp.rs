@@ -118,11 +118,7 @@ impl Driver for CodexMcpDriver {
         let tx = self.writer_tx.as_ref().ok_or(DriverError::AgentExited)?;
 
         match frame {
-            ClientFrame::SessionConfig(_) => Err(DriverError::AgentError {
-                code: "cap_session_config_inline_unsupported".into(),
-                message: "Codex MCP consumes session config at spawn — re-spawn to change it"
-                    .into(),
-            }),
+            ClientFrame::SessionConfig(_) => Ok(()),
 
             ClientFrame::Prompt { content } => {
                 let prompt_text = content
@@ -554,11 +550,11 @@ fn handle_response(
     };
 
     // Claimed by a handshake awaiter?
-    if let Some(id) = id {
-        if let Some(tx) = pending.lock().expect("pending mutex poisoned").remove(&id) {
-            let _ = tx.send(result);
-            return Vec::new();
-        }
+    if let Some(id) = id
+        && let Some(tx) = pending.lock().expect("pending mutex poisoned").remove(&id)
+    {
+        let _ = tx.send(result);
+        return Vec::new();
     }
 
     // Unclaimed response: this is the tools/call result for the prompt turn.
@@ -585,21 +581,20 @@ fn handle_response(
     // Only emit the structuredContent as a TextChunk when nothing was streamed
     // — otherwise the deltas already carried the same text, and emitting it
     // again would route it twice to downstream sessions.
-    if !already_streamed {
-        if let Some(content) = res
+    if !already_streamed
+        && let Some(content) = res
             .pointer("/structuredContent/content")
             .and_then(Value::as_str)
-        {
-            events.push(AgentEvent::TextChunk {
-                msg_id: res
-                    .pointer("/structuredContent/threadId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                text: content.to_string(),
-                channel: TextChannel::Assistant,
-            });
-        }
+    {
+        events.push(AgentEvent::TextChunk {
+            msg_id: res
+                .pointer("/structuredContent/threadId")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            text: content.to_string(),
+            channel: TextChannel::Assistant,
+        });
     }
     events.push(AgentEvent::Done {
         stop_reason: StopReason::EndTurn,
@@ -708,6 +703,11 @@ fn handle_codex_event(
                         call_id: item_id,
                         output,
                         is_error: status == "failed",
+                        duration: item
+                            .get("duration_ms")
+                            .or_else(|| item.get("durationMs"))
+                            .and_then(Value::as_u64)
+                            .map(std::time::Duration::from_millis),
                     }]
                 }
                 "FunctionCall" | "function_call" | "McpToolCall" | "mcp_tool_call" => {
@@ -723,6 +723,11 @@ fn handle_codex_event(
                         call_id: item_id,
                         output,
                         is_error: false,
+                        duration: item
+                            .get("duration_ms")
+                            .or_else(|| item.get("durationMs"))
+                            .and_then(Value::as_u64)
+                            .map(std::time::Duration::from_millis),
                     }]
                 }
                 _ => Vec::new(),
@@ -862,7 +867,7 @@ mod tests {
             &no_model(),
         );
         assert!(matches!(&events[0],
-            AgentEvent::ToolCallEnd { call_id, is_error, output }
+            AgentEvent::ToolCallEnd { call_id, is_error, output, .. }
             if call_id == "i1" && *is_error && output == "command not found"));
     }
 

@@ -14,6 +14,7 @@
 //! (Claude Code TUI, aider, codex CLI, …) layer on top.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -23,6 +24,9 @@ use tracing::{debug, trace, warn};
 
 use crate::core::{AgentEvent, CancelScope, ClientFrame, Content, StopReason, TextChannel, Usage};
 use crate::driver::{Driver, DriverError, DriverExitStatus};
+
+type ChildKillerHandle =
+    std::sync::Arc<std::sync::Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>>;
 
 // ---------------------------------------------------------------------------
 // PromptGate
@@ -250,6 +254,7 @@ pub struct ReplParser {
     emit_cursor: usize,
     prompts: Vec<regex_lite::Regex>,
     ask_yes_no: Option<regex_lite::Regex>,
+    ask_options: Option<regex_lite::Regex>,
     /// Have we seen a prompt yet (first prompt = "ready", subsequent = "done")
     seen_first_prompt: bool,
     /// Tag for synthesized event message_id, monotonic per turn.
@@ -301,9 +306,15 @@ impl ReplParser {
             emit_cursor: 0,
             prompts,
             ask_yes_no,
+            ask_options: None,
             seen_first_prompt: false,
             turn: 0,
         }
+    }
+
+    pub fn with_ask_options(mut self, pattern: &str) -> Self {
+        self.ask_options = Some(regex_lite::Regex::new(pattern).expect("invalid regex"));
+        self
     }
 
     fn current_screen(&mut self) -> String {
@@ -341,20 +352,68 @@ impl ReplParser {
                 }
                 return events;
             }
-            if let Some(re) = &self.ask_yes_no {
-                if re.is_match(trimmed) {
-                    events.push(AgentEvent::AskUser {
-                        ask_id: format!("ask_{}", self.turn),
-                        prompt: trimmed.to_string(),
-                        ask_kind: crate::core::AskKind::YesNo,
-                        options: Vec::new(),
-                        timeout_seconds: None,
-                    });
-                    return events;
-                }
+            if let Some(re) = &self.ask_yes_no
+                && re.is_match(trimmed)
+            {
+                events.push(AgentEvent::AskUser {
+                    ask_id: format!("ask_{}", self.turn),
+                    prompt: trimmed.to_string(),
+                    ask_kind: crate::core::AskKind::YesNo,
+                    options: Vec::new(),
+                    timeout_seconds: None,
+                });
+                return events;
+            }
+            if let Some(re) = &self.ask_options
+                && re.is_match(trimmed)
+            {
+                events.push(AgentEvent::AskUser {
+                    ask_id: format!("ask_{}", self.turn),
+                    prompt: trimmed.to_string(),
+                    ask_kind: crate::core::AskKind::Options,
+                    options: parse_inline_options(trimmed),
+                    timeout_seconds: None,
+                });
+                return events;
             }
         }
         events
+    }
+}
+
+fn parse_inline_options(line: &str) -> Vec<crate::core::AskOption> {
+    let candidate = line
+        .split_once(':')
+        .map(|(_, rest)| rest)
+        .unwrap_or(line)
+        .trim();
+    let split = candidate
+        .split(['|', '/', ','])
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    split
+        .enumerate()
+        .map(|(idx, label)| crate::core::AskOption {
+            id: label
+                .split_whitespace()
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(label)
+                .trim_matches(['[', ']', '(', ')'])
+                .to_string()
+                .if_empty_else(|| format!("option_{}", idx + 1)),
+            label: label.to_string(),
+        })
+        .collect()
+}
+
+trait StringEmptyExt {
+    fn if_empty_else(self, f: impl FnOnce() -> String) -> String;
+}
+
+impl StringEmptyExt for String {
+    fn if_empty_else(self, f: impl FnOnce() -> String) -> String {
+        if self.is_empty() { f() } else { self }
     }
 }
 
@@ -573,14 +632,10 @@ impl TuiParser {
     /// Generic full-screen TUI fallback for an unknown `pty:<cmd>` agent.
     /// Accepts the usual prompt glyphs. Turn detection is best-effort until a
     /// real marker is captured for the specific agent.
-    /// Tuned for aider chat (https://github.com/paul-gauthier/aider).
+    /// Tuned for aider chat (<https://github.com/paul-gauthier/aider>).
     /// Uses `>` prompt marker and 800 ms idle timeout.
     pub fn aider() -> Self {
-        Self::custom(
-            "aider",
-            &[r">\s*$", r"❯"],
-            Duration::from_millis(800),
-        )
+        Self::custom("aider", &[r">\s*$", r"❯"], Duration::from_millis(800))
     }
 
     pub fn generic() -> Self {
@@ -848,6 +903,18 @@ pub struct PtyDriver {
     /// Final exit status, set once the child has reaped.
     exit_status: std::sync::Arc<std::sync::Mutex<Option<DriverExitStatus>>>,
 
+    /// Signal handle cloned from the child before the waiter owns it.
+    child_killer: ChildKillerHandle,
+
+    /// Child process id, when the platform exposes one.
+    process_id: Option<u32>,
+
+    /// Grace period between SIGTERM and SIGKILL for `Cancel { Session }`.
+    hard_cancel_grace: Duration,
+
+    /// Emit `cap.pty.raw_bytes` alongside parsed events.
+    include_raw_bytes: bool,
+
     /// Parser-supplied gate, written on each `Prompt` so a quiescence parser
     /// knows the conversation started and can confirm the prompt submitted.
     /// `None` when the parser does no prompt gating.
@@ -879,6 +946,8 @@ impl PtyDriver {
                 pixel_width: 0,
                 pixel_height: 0,
             },
+            hard_cancel_grace: Duration::from_secs(5),
+            include_raw_bytes: false,
         }
     }
 
@@ -909,6 +978,10 @@ impl PtyDriver {
             .await
             .map_err(|_| DriverError::AgentExited)?;
         Ok(())
+    }
+
+    fn kill_child(&self) -> Result<(), DriverError> {
+        kill_child_handle(&self.child_killer)
     }
 }
 
@@ -957,30 +1030,21 @@ impl Driver for PtyDriver {
                 match scope {
                     CancelScope::CurrentTurn => self.send_bytes(b"\x03").await, // Ctrl+C
                     CancelScope::Session => {
-                        // Send SIGINT (Ctrl+C) first for graceful shutdown.
-                        self.send_bytes(b"\x03").await?;
-                        // Give the process a moment to exit cleanly.
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                        // If still alive, send another SIGINT to encourage exit.
-                        // A proper SIGTERM would require platform-specific code
-                        // to access the child's PID (portable-pty's Child trait
-                        // doesn't expose it). For most CLI agents, repeated
-                        // SIGINT is sufficient to trigger shutdown.
-                        if self.is_alive() {
-                            self.send_bytes(b"\x03").await?;
-                        }
-                        Ok(())
+                        hard_cancel_session(
+                            std::sync::Arc::clone(&self.child_killer),
+                            self.process_id,
+                            std::sync::Arc::clone(&self.exited),
+                            self.hard_cancel_grace,
+                        )
+                        .await
                     }
                 }
             }
             ClientFrame::SessionConfig(_) => {
-                // PTY agents take config via spawn-time argv/env. An inline
-                // `cap.session.config` after the session is up has no
-                // wire equivalent on raw stdin.
-                Err(DriverError::AgentError {
-                    code: "cap_session_config_inline_unsupported".into(),
-                    message: "PTY binding consumes SessionConfig at spawn".into(),
-                })
+                // PTY agents consume config at spawn-time. The orchestrator
+                // still sends the CAP-required first frame; acknowledge it so
+                // the lifecycle remains spec-ordered.
+                Ok(())
             }
             ClientFrame::AskUserAnswer { value, .. } => {
                 // Best-effort: type the answer + Enter.
@@ -1021,6 +1085,7 @@ impl Driver for PtyDriver {
             self.exited
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        let _ = self.kill_child();
         // Closing the master forces slave HUP; the reader thread will see
         // EOF and exit. We rely on Drop to deallocate.
         Ok(())
@@ -1053,6 +1118,8 @@ pub struct PtyDriverBuilder {
     env: Vec<(String, String)>,
     env_remove: Vec<String>,
     size: PtySize,
+    hard_cancel_grace: Duration,
+    include_raw_bytes: bool,
 }
 
 impl PtyDriverBuilder {
@@ -1093,6 +1160,16 @@ impl PtyDriverBuilder {
         self
     }
 
+    pub fn hard_cancel_grace(mut self, grace: Duration) -> Self {
+        self.hard_cancel_grace = grace;
+        self
+    }
+
+    pub fn include_raw_bytes(mut self, include: bool) -> Self {
+        self.include_raw_bytes = include;
+        self
+    }
+
     /// Spawn the agent under a PTY and start the reader / writer tasks.
     pub fn spawn<P: AgentParser>(self, parser: P) -> Result<PtyDriver, DriverError> {
         let PtyDriverBuilder {
@@ -1102,6 +1179,8 @@ impl PtyDriverBuilder {
             env,
             env_remove,
             size,
+            hard_cancel_grace,
+            include_raw_bytes,
         } = self;
 
         let pty_system = native_pty_system();
@@ -1139,6 +1218,8 @@ impl PtyDriverBuilder {
             .slave
             .spawn_command(builder)
             .map_err(|e| DriverError::SpawnFailed(std::io::Error::other(e.to_string())))?;
+        let process_id = child.process_id();
+        let child_killer = std::sync::Arc::new(std::sync::Mutex::new(child.clone_killer()));
 
         let reader = pair
             .master
@@ -1169,6 +1250,7 @@ impl PtyDriverBuilder {
             event_tx.clone(),
             input_tx.clone(),
             std::sync::Arc::clone(&exited),
+            include_raw_bytes,
         )?;
         spawn_writer_thread(writer, input_rx)?;
         spawn_child_waiter(
@@ -1187,6 +1269,10 @@ impl PtyDriverBuilder {
             master: pair.master,
             exited,
             exit_status,
+            child_killer,
+            process_id,
+            hard_cancel_grace,
+            include_raw_bytes,
             prompt_gate,
         })
     }
@@ -1195,6 +1281,67 @@ impl PtyDriverBuilder {
 // ---------------------------------------------------------------------------
 // Background threads (PTY API is sync; we bridge to async via channels)
 // ---------------------------------------------------------------------------
+
+fn kill_child_handle(child_killer: &ChildKillerHandle) -> Result<(), DriverError> {
+    child_killer
+        .lock()
+        .expect("child killer mutex poisoned")
+        .kill()
+        .map_err(|e| DriverError::Io(std::io::Error::other(e.to_string())))
+}
+
+#[cfg(unix)]
+fn signal_child_handle(
+    child_killer: &ChildKillerHandle,
+    process_id: Option<u32>,
+    signal: libc::c_int,
+) -> Result<(), DriverError> {
+    let Some(pid) = process_id else {
+        return kill_child_handle(child_killer);
+    };
+    let rc = unsafe { libc::kill(pid as libc::pid_t, signal) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let e = std::io::Error::last_os_error();
+    if e.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(DriverError::Io(e))
+}
+
+#[cfg(not(unix))]
+fn signal_child_handle(
+    child_killer: &ChildKillerHandle,
+    _process_id: Option<u32>,
+    _signal: i32,
+) -> Result<(), DriverError> {
+    kill_child_handle(child_killer)
+}
+
+async fn hard_cancel_session(
+    child_killer: ChildKillerHandle,
+    process_id: Option<u32>,
+    exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    grace: Duration,
+) -> Result<(), DriverError> {
+    if exited.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    signal_child_handle(&child_killer, process_id, libc::SIGTERM)?;
+    #[cfg(not(unix))]
+    signal_child_handle(&child_killer, process_id, 0)?;
+
+    tokio::time::sleep(grace).await;
+    if !exited.load(std::sync::atomic::Ordering::Relaxed) {
+        #[cfg(unix)]
+        signal_child_handle(&child_killer, process_id, libc::SIGKILL)?;
+        #[cfg(not(unix))]
+        kill_child_handle(&child_killer)?;
+    }
+    Ok(())
+}
 
 /// Reader thread: blocking PTY reads, forwarding raw byte chunks to the parser
 /// thread. Owns no parser and no event channel — its sole job is to drain the
@@ -1243,6 +1390,7 @@ fn spawn_parser_thread<P: AgentParser>(
     tx: mpsc::Sender<AgentEvent>,
     input_tx: mpsc::Sender<Vec<u8>>,
     exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    include_raw_bytes: bool,
 ) -> Result<(), DriverError> {
     use std::sync::mpsc::RecvTimeoutError;
     std::thread::Builder::new()
@@ -1269,7 +1417,19 @@ fn spawn_parser_thread<P: AgentParser>(
                     None => raw_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
                 };
                 let events = match recv {
-                    Ok(bytes) => parser.on_bytes(&bytes),
+                    Ok(bytes) => {
+                        if include_raw_bytes
+                            && tx
+                                .blocking_send(AgentEvent::PtyRawBytes {
+                                    bytes: Arc::from(bytes.clone().into_boxed_slice()),
+                                })
+                                .is_err()
+                        {
+                            trace!("PTY parser: receiver dropped, exiting");
+                            return;
+                        }
+                        parser.on_bytes(&bytes)
+                    }
                     Err(RecvTimeoutError::Timeout) => parser.on_idle(),
                     Err(RecvTimeoutError::Disconnected) => break,
                 };
@@ -1327,16 +1487,26 @@ fn spawn_child_waiter(
         .spawn(move || {
             let status = child.wait();
             let mut slot = exit_status.lock().expect("exit_status mutex poisoned");
+            let unexpected = slot.is_none();
+            let final_status = match status {
+                Ok(s) => DriverExitStatus::Exited {
+                    code: i32::try_from(s.exit_code()).ok(),
+                },
+                Err(_) => DriverExitStatus::Disconnected,
+            };
             if slot.is_none() {
-                *slot = Some(match status {
-                    Ok(s) => DriverExitStatus::Exited {
-                        code: i32::try_from(s.exit_code()).ok(),
-                    },
-                    Err(_) => DriverExitStatus::Disconnected,
-                });
+                *slot = Some(final_status.clone());
             }
             drop(slot);
             exited.store(true, std::sync::atomic::Ordering::Relaxed);
+            if unexpected {
+                let _ = event_tx.blocking_send(AgentEvent::Error {
+                    code: "pty_died".into(),
+                    message: format!("PTY child exited unexpectedly: {final_status:?}"),
+                    retryable: false,
+                    details: None,
+                });
+            }
             drop(event_tx);
         })
         .map_err(|e| DriverError::Io(std::io::Error::other(e.to_string())))?;
@@ -1374,6 +1544,56 @@ mod tests {
         let mut g = gate.lock().unwrap();
         g.armed = true;
         g.pending_submit = None;
+    }
+
+    #[tokio::test]
+    async fn child_exit_emits_pty_died_error() {
+        let mut driver = PtyDriver::builder("/bin/sh")
+            .args(["-lc", "exit 7"])
+            .spawn(RawParser)
+            .unwrap();
+
+        let mut saw_pty_died = false;
+        for _ in 0..8 {
+            let ev = tokio::time::timeout(Duration::from_secs(2), driver.next_event())
+                .await
+                .unwrap();
+            let Some(ev) = ev else { break };
+            if let AgentEvent::Error { code, .. } = ev {
+                saw_pty_died = code == "pty_died";
+                break;
+            }
+        }
+        assert!(saw_pty_died);
+    }
+
+    #[tokio::test]
+    async fn cancel_session_terminates_pty_child() {
+        let mut driver = PtyDriver::builder("/bin/sh")
+            .args(["-lc", "trap '' INT; while true; do sleep 1; done"])
+            .hard_cancel_grace(Duration::from_millis(50))
+            .spawn(RawParser)
+            .unwrap();
+
+        driver
+            .send(ClientFrame::Cancel {
+                scope: CancelScope::Session,
+                reason: Some("test".into()),
+            })
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while driver.is_alive() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            driver.exit_status(),
+            Some(DriverExitStatus::Exited { .. } | DriverExitStatus::Disconnected)
+        ));
     }
 
     /// A turn after Ready (and after a real prompt) settles to `TextChunk`

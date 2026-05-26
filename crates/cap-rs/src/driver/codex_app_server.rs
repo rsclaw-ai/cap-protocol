@@ -142,11 +142,7 @@ impl Driver for CodexAppServerDriver {
         let tx = self.writer_tx.as_ref().ok_or(DriverError::AgentExited)?;
 
         match frame {
-            ClientFrame::SessionConfig(_) => Err(DriverError::AgentError {
-                code: "cap_session_config_inline_unsupported".into(),
-                message: "codex app-server consumes SessionConfig at spawn — re-spawn to change it"
-                    .into(),
-            }),
+            ClientFrame::SessionConfig(_) => Ok(()),
 
             ClientFrame::Prompt { content } => {
                 let tid = self.thread_id().ok_or_else(|| DriverError::AgentError {
@@ -702,25 +698,23 @@ fn process_frame(
         // No awaiter — usually a response to a fire-and-forget request
         // (turn/start, turn/interrupt). Drop successes silently; surface
         // errors so the orchestrator sees them.
-        if is_error {
-            if let Some(err) = err_payload {
-                let code = err
-                    .get("code")
-                    .and_then(Value::as_i64)
-                    .map(|c| format!("codex_jsonrpc_{c}"))
-                    .unwrap_or_else(|| "codex_jsonrpc_error".into());
-                let message = err
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                return vec![AgentEvent::Error {
-                    code,
-                    message,
-                    retryable: false,
-                    details: None,
-                }];
-            }
+        if is_error && let Some(err) = err_payload {
+            let code = err
+                .get("code")
+                .and_then(Value::as_i64)
+                .map(|c| format!("codex_jsonrpc_{c}"))
+                .unwrap_or_else(|| "codex_jsonrpc_error".into());
+            let message = err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            return vec![AgentEvent::Error {
+                code,
+                message,
+                retryable: false,
+                details: None,
+            }];
         }
         return Vec::new();
     }
@@ -916,6 +910,11 @@ fn parse_notification(
                         call_id: item_id,
                         output,
                         is_error,
+                        duration: item
+                            .get("duration_ms")
+                            .or_else(|| item.get("durationMs"))
+                            .and_then(Value::as_u64)
+                            .map(std::time::Duration::from_millis),
                     }]
                 }
                 "mcp_tool_call" | "mcpToolCall" => {
@@ -931,6 +930,11 @@ fn parse_notification(
                         call_id: item_id,
                         output,
                         is_error: false,
+                        duration: item
+                            .get("duration_ms")
+                            .or_else(|| item.get("durationMs"))
+                            .and_then(Value::as_u64)
+                            .map(std::time::Duration::from_millis),
                     }]
                 }
                 _ => Vec::new(),

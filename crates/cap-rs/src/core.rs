@@ -107,6 +107,15 @@ pub struct SessionConfig {
     pub profile_config: BTreeMap<String, serde_json::Value>,
 }
 
+impl SessionConfig {
+    pub fn new(cwd: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            cwd: cwd.into(),
+            ..Default::default()
+        }
+    }
+}
+
 /// Permission negotiation mode declared by the Orchestrator (spec §7.10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -226,6 +235,14 @@ pub enum AgentEvent {
         call_id: String,
         output: String,
         is_error: bool,
+        /// Tool execution duration, serialized as `duration_ms` per spec §7.2.
+        #[serde(
+            default,
+            rename = "duration_ms",
+            skip_serializing_if = "Option::is_none",
+            with = "duration_ms_opt"
+        )]
+        duration: Option<Duration>,
     },
 
     /// Agent published an updated plan (full state, REPLACES previous —
@@ -291,6 +308,13 @@ pub enum AgentEvent {
         retryable: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         details: Option<serde_json::Value>,
+    },
+
+    /// Raw PTY byte chunk for explicit terminal mirror subscribers (§7.12).
+    #[serde(rename = "cap.pty.raw_bytes")]
+    PtyRawBytes {
+        #[serde(rename = "bytes_b64", with = "arc_b64")]
+        bytes: Arc<[u8]>,
     },
 
     /// A Reverse RPC call from the agent to the orchestrator (§8).
@@ -527,7 +551,7 @@ pub(crate) mod base64 {
 
     pub fn decode(s: &str) -> Result<Vec<u8>, &'static str> {
         let bytes: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-        if bytes.len() % 4 != 0 {
+        if !bytes.len().is_multiple_of(4) {
             return Err("invalid base64 length");
         }
         let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
@@ -733,6 +757,27 @@ mod tests {
         assert_eq!(j["duration_ms"], 1234);
         assert_eq!(j["stop_reason"], "end_turn");
         let _back: AgentEvent = serde_json::from_value(j).unwrap();
+    }
+
+    #[test]
+    fn agent_event_roundtrip_tool_call_end_duration() {
+        let ev = AgentEvent::ToolCallEnd {
+            call_id: "call_1".into(),
+            output: "done".into(),
+            is_error: false,
+            duration: Some(Duration::from_millis(42)),
+        };
+        let j = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json_kind(&j), "cap.tool_call.end");
+        assert_eq!(j["duration_ms"], 42);
+        let back: AgentEvent = serde_json::from_value(j).unwrap();
+        assert!(matches!(
+            back,
+            AgentEvent::ToolCallEnd {
+                duration: Some(d),
+                ..
+            } if d == Duration::from_millis(42)
+        ));
     }
 
     #[test]
