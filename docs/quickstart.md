@@ -35,6 +35,7 @@ cap run fleet.yaml --task "Write hello world in Rust"
 |--------|-------|---------|
 | `claude` | Claude Code | `claude` |
 | `openclaude` | OpenClaude (stream-json) | `openclaude` |
+| `opencode` | OpenCode (stream-json) | `opencode` |
 | `codex` | OpenAI Codex | `codex` |
 | `acp:opencode` | OpenCode (ACP) | `opencode acp` |
 | `grpc:localhost:50051` | OpenClaude (gRPC) | `openclaude grpc` |

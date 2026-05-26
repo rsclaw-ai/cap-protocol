@@ -1,15 +1,16 @@
 //! Builds real `cap-rs` drivers. Each first-class agent name maps to its
 //! highest-fidelity structured path:
 //! - `claude` → `stream-json`
+//! - `openclaude` → `stream-json` (Anthropic SDK-compatible)
+//! - `opencode` → `stream-json` (Claude Code-compatible NDJSON)
 //! - `codex` → `codex mcp-server` (stdio MCP)
-//! - `acp:opencode` → ACP over stdio
+//! - `acp:<cmd>` → ACP over stdio
 //!
 //! `pty:<cmd>` remains the universal screen-scraping fallback; `pty:codex`
 //! still works (with the codex-tuned [`TuiParser::codex`]) if a caller needs
 //! the old behavior. `pty:openclaude` uses a tuned parser with `>` prompt
 //! markers from the reference manifest.
 //!
-//! `openclaude` uses stream-json (same as claude) for maximum fidelity;
 //! `grpc:<addr>` is the alternative gRPC path with reduced event detail.
 
 use std::path::Path;
@@ -57,6 +58,16 @@ impl DriverFactory for RealDriverFactory {
                     .dangerously_skip_permissions(bypass)
                     .spawn()
                     .await?;
+                Ok(Box::new(driver))
+            }
+            // opencode: stream-json fast-path (Claude Code-compatible NDJSON).
+            // Same fidelity as claude/openclaude: per-token streaming deltas,
+            // structured tool/permission events, usage stats. Uses
+            // `opencode run --output-format stream-json` with stdin prompt
+            // delivery — the existing CAP send() flow works unchanged.
+            // `acp:opencode` remains available as an alternative path.
+            DriverKind::OpenCode => {
+                let driver = ClaudeCodeDriver::opencode_builder(cwd).spawn().await?;
                 Ok(Box::new(driver))
             }
             // codex: stdio MCP server (`codex mcp-server`). Structured streaming

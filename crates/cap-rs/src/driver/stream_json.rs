@@ -90,6 +90,37 @@ impl ClaudeCodeDriver {
             // safe default is to leave claude's prompting on. Callers that
             // accept the trade-off invoke `.dangerously_skip_permissions(true)`.
             dangerously_skip_permissions: false,
+            is_opencode: false,
+        }
+    }
+
+    /// Builder pre-configured for OpenCode via stream-json.
+    ///
+    /// Spawns `opencode run --output-format stream-json` and reads
+    /// Claude Code-compatible NDJSON frames from stdout. The prompt is
+    /// delivered via stdin (same as Claude Code), so the existing
+    /// `send(ClientFrame::Prompt)` flow works unchanged.
+    ///
+    /// ```no_run
+    /// # async fn run() -> anyhow::Result<()> {
+    /// use cap_rs::driver::stream_json::ClaudeCodeDriver;
+    ///
+    /// let driver = ClaudeCodeDriver::opencode_builder(".")
+    ///     .spawn()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn opencode_builder(cwd: impl AsRef<Path>) -> ClaudeCodeDriverBuilder {
+        ClaudeCodeDriverBuilder {
+            bin: Some("opencode".to_string()),
+            cwd: cwd.as_ref().to_path_buf(),
+            model: None,
+            session_id: None,
+            resume: None,
+            replay_user_messages: false,
+            dangerously_skip_permissions: false,
+            is_opencode: true,
         }
     }
 
@@ -102,37 +133,61 @@ impl ClaudeCodeDriver {
             resume,
             replay_user_messages,
             dangerously_skip_permissions,
+            is_opencode,
         } = b;
 
-        let bin = bin
-            .or_else(|| std::env::var("CLAUDE_BIN").ok())
-            .unwrap_or_else(|| "claude".to_string());
+        let bin = if is_opencode {
+            bin.or_else(|| std::env::var("OPENCODE_BIN").ok())
+                .unwrap_or_else(|| "opencode".to_string())
+        } else {
+            bin.or_else(|| std::env::var("CLAUDE_BIN").ok())
+                .unwrap_or_else(|| "claude".to_string())
+        };
 
         let mut cmd = Command::new(&bin);
-        cmd.arg("-p")
-            .arg("--input-format=stream-json")
-            .arg("--output-format=stream-json")
-            .arg("--verbose")
-            .current_dir(&cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
 
-        if dangerously_skip_permissions {
-            cmd.arg("--dangerously-skip-permissions");
-        }
-        if replay_user_messages {
-            cmd.arg("--replay-user-messages");
-        }
-        if let Some(m) = &model {
-            cmd.arg("--model").arg(m);
-        }
-        if let Some(sid) = &session_id {
-            cmd.arg("--session-id").arg(sid);
-        }
-        if let Some(rid) = &resume {
-            cmd.arg("--resume").arg(rid);
+        if is_opencode {
+            // OpenCode: `opencode run --output-format stream-json`
+            // Prompt is delivered via stdin (one stream-json frame),
+            // same protocol as Claude Code's stdin prompt delivery.
+            cmd.arg("run")
+                .arg("--output-format")
+                .arg("stream-json")
+                .current_dir(&cwd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            if let Some(m) = &model {
+                cmd.arg("--model").arg(m);
+            }
+        } else {
+            // Claude Code: `claude -p --input-format=stream-json --output-format=stream-json`
+            cmd.arg("-p")
+                .arg("--input-format=stream-json")
+                .arg("--output-format=stream-json")
+                .arg("--verbose")
+                .current_dir(&cwd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+
+            if dangerously_skip_permissions {
+                cmd.arg("--dangerously-skip-permissions");
+            }
+            if replay_user_messages {
+                cmd.arg("--replay-user-messages");
+            }
+            if let Some(m) = &model {
+                cmd.arg("--model").arg(m);
+            }
+            if let Some(sid) = &session_id {
+                cmd.arg("--session-id").arg(sid);
+            }
+            if let Some(rid) = &resume {
+                cmd.arg("--resume").arg(rid);
+            }
         }
 
         // Strip parent-session env vars so claude doesn't refuse to launch
@@ -153,10 +208,11 @@ impl ClaudeCodeDriver {
         debug!(
             bin = %bin,
             cwd = %cwd.display(),
+            is_opencode,
             session_mode = replay_user_messages,
             resume = ?resume,
             session_id = ?session_id,
-            "spawning claude",
+            "spawning agent",
         );
 
         let mut child = cmd.spawn().map_err(|e| {
@@ -167,17 +223,18 @@ impl ClaudeCodeDriver {
             }
         })?;
 
-        let stdin = child.stdin.take().ok_or(DriverError::AgentExited)?;
         let stdout = child.stdout.take().ok_or(DriverError::AgentExited)?;
         let stderr = child.stderr.take().ok_or(DriverError::AgentExited)?;
 
-        let (writer_tx, writer_rx) = mpsc::channel::<String>(32);
         let (reader_tx, reader_rx) = mpsc::channel::<AgentEvent>(64);
 
         let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let exit_status = std::sync::Arc::new(std::sync::Mutex::new(None));
 
-        // Writer task: forward queued lines to claude's stdin.
+        // Writer task: forward queued lines to the agent's stdin.
+        // Both Claude Code and OpenCode receive prompts via stdin.
+        let stdin = child.stdin.take().ok_or(DriverError::AgentExited)?;
+        let (writer_tx, writer_rx) = mpsc::channel::<String>(32);
         tokio::spawn(writer_task(stdin, writer_rx));
 
         // Reader task: parse NDJSON from stdout into AgentEvents.
@@ -237,6 +294,8 @@ pub struct ClaudeCodeDriverBuilder {
     resume: Option<String>,
     replay_user_messages: bool,
     dangerously_skip_permissions: bool,
+    /// When true, use OpenCode CLI shape instead of Claude Code.
+    is_opencode: bool,
 }
 
 impl ClaudeCodeDriverBuilder {
@@ -309,7 +368,7 @@ impl Driver for ClaudeCodeDriver {
     async fn send(&mut self, frame: ClientFrame) -> Result<(), DriverError> {
         let tx = self.writer_tx.as_ref().ok_or(DriverError::AgentExited)?;
         let line = encode_client_frame(&frame)?;
-        trace!(line = %line, "→ claude");
+        trace!(line = %line, "→ agent");
         tx.send(line).await.map_err(|_| DriverError::AgentExited)?;
         Ok(())
     }
@@ -626,9 +685,50 @@ fn parse_stream_frame(frame: &Value) -> Vec<AgentEvent> {
         }
 
         "stream_event" => {
-            // Partial message deltas (only with --include-partial-messages).
-            // We don't request them in the spawn args, so skip.
-            vec![]
+            // Token-level streaming deltas (content_block_delta).
+            // Emitted by Claude Code with --include-partial-messages and by
+            // OpenCode's --output-format stream-json encoder.
+            let ev = frame.get("event").cloned().unwrap_or(Value::Null);
+            let etype = ev.get("type").and_then(Value::as_str).unwrap_or("");
+            if etype != "content_block_delta" {
+                return vec![];
+            }
+            let delta = ev.get("delta").cloned().unwrap_or(Value::Null);
+            let dtype = delta.get("type").and_then(Value::as_str).unwrap_or("");
+            match dtype {
+                "text_delta" => {
+                    let text = delta
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    if text.is_empty() {
+                        vec![]
+                    } else {
+                        vec![AgentEvent::TextChunk {
+                            msg_id: String::new(),
+                            text,
+                            channel: TextChannel::Assistant,
+                        }]
+                    }
+                }
+                "thinking_delta" => {
+                    let text = delta
+                        .get("thinking")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    if text.is_empty() {
+                        vec![]
+                    } else {
+                        vec![AgentEvent::Thought {
+                            msg_id: String::new(),
+                            text,
+                        }]
+                    }
+                }
+                _ => vec![],
+            }
         }
 
         other => {
@@ -799,5 +899,46 @@ mod tests {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
         );
+    }
+
+    #[test]
+    fn parse_stream_event_text_delta() {
+        let v: Value = serde_json::from_str(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}}"#,
+        )
+        .unwrap();
+        let events = parse_stream_frame(&v);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            AgentEvent::TextChunk { text, channel, .. } => {
+                assert_eq!(text, "Hello");
+                assert_eq!(*channel, TextChannel::Assistant);
+            }
+            other => panic!("wrong: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stream_event_thinking_delta() {
+        let v: Value = serde_json::from_str(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me think..."}}}"#,
+        )
+        .unwrap();
+        let events = parse_stream_frame(&v);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            AgentEvent::Thought { text, .. } => assert_eq!(text, "Let me think..."),
+            other => panic!("wrong: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stream_event_ignores_unknown() {
+        let v: Value = serde_json::from_str(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{}}}"#,
+        )
+        .unwrap();
+        let events = parse_stream_frame(&v);
+        assert!(events.is_empty());
     }
 }

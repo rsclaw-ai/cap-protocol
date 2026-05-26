@@ -15,6 +15,25 @@ pub struct FleetSpec {
     pub fleet: Fleet,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingMode {
+    #[default]
+    Static,
+    Llm,
+    Hybrid,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmConfig {
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
+    pub system_prompt: Option<String>,
+    pub timeout_secs: Option<u64>,
+    pub max_decisions: Option<usize>,
+    pub max_context_chars: Option<usize>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Fleet {
     pub base_branch: String,
@@ -23,6 +42,11 @@ pub struct Fleet {
     /// Fleet-level permission default; per-session may override.
     #[serde(default)]
     pub permissions: PermissionPolicy,
+    /// Routing mode: static (default), llm, or hybrid.
+    #[serde(default)]
+    pub mode: RoutingMode,
+    /// LLM orchestrator configuration (required when mode == llm or hybrid).
+    pub llm: Option<LlmConfig>,
     pub sessions: BTreeMap<SessionId, SessionSpec>,
     pub start: Start,
     #[serde(default)]
@@ -35,6 +59,8 @@ pub struct SessionSpec {
     /// `None` means "inherit the fleet-level policy".
     #[serde(default)]
     pub permissions: Option<PermissionPolicy>,
+    /// Human-readable role description for LLM-driven orchestration (e.g. "code reviewer").
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -47,18 +73,44 @@ pub enum PermissionPolicy {
     Bypass,
 }
 
-/// `claude` | `openclaude` | `codex` | `grpc:<addr>` | `acp:<command>` | `pty:<command>`.
+/// `claude` | `openclaude` | `codex` | `opencode` | `grpc:<addr>` | `acp:<command>` | `pty:<command>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriverKind {
     Claude,
-    /// OpenClaude via stream-json (Anthropic SDK-compatible CLI).
     OpenClaude,
     Codex,
+    /// OpenCode via stream-json (Claude Code-compatible NDJSON frames).
+    /// Higher fidelity than ACP: token-level deltas, no handshake overhead.
+    OpenCode,
     /// Structured Agent Client Protocol agent (e.g. `acp:opencode`).
     Acp(String),
     /// OpenClaude gRPC server (e.g. `grpc:localhost:50051`).
     Grpc(String),
     Pty(String),
+}
+
+impl DriverKind {
+    /// Parse a driver kind from its string representation (reverse of the
+    /// display/deserialization format).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "claude" => Some(DriverKind::Claude),
+            "openclaude" => Some(DriverKind::OpenClaude),
+            "codex" => Some(DriverKind::Codex),
+            "opencode" => Some(DriverKind::OpenCode),
+            _ => s
+                .strip_prefix("grpc:")
+                .map(|addr| DriverKind::Grpc(addr.to_string()))
+                .or_else(|| {
+                    s.strip_prefix("acp:")
+                        .map(|cmd| DriverKind::Acp(cmd.to_string()))
+                })
+                .or_else(|| {
+                    s.strip_prefix("pty:")
+                        .map(|cmd| DriverKind::Pty(cmd.to_string()))
+                }),
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for DriverKind {
@@ -68,6 +120,7 @@ impl<'de> Deserialize<'de> for DriverKind {
             "claude" => DriverKind::Claude,
             "openclaude" => DriverKind::OpenClaude,
             "codex" => DriverKind::Codex,
+            "opencode" => DriverKind::OpenCode,
             other => {
                 if let Some(addr) = other.strip_prefix("grpc:") {
                     if !valid_grpc_address(addr) {
@@ -92,7 +145,7 @@ impl<'de> Deserialize<'de> for DriverKind {
                     DriverKind::Pty(cmd.to_string())
                 } else {
                     return Err(serde::de::Error::custom(format!(
-                        "unknown driver kind '{other}' (expected claude | openclaude | codex | grpc:<host:port> | acp:<cmd> | pty:<cmd>)"
+                        "unknown driver kind '{other}' (expected claude | openclaude | codex | opencode | grpc:<host:port> | acp:<cmd> | pty:<cmd>)"
                     )));
                 }
             }
@@ -106,6 +159,7 @@ pub fn list_driver_kinds() -> Vec<&'static str> {
         "claude       Claude Code CLI (stream-json)",
         "openclaude   OpenClaude CLI (stream-json, Anthropic SDK-compatible)",
         "codex        OpenAI Codex CLI (MCP)",
+        "opencode     OpenCode CLI (stream-json, Claude Code-compatible)",
         "acp:<cmd>    Any ACP-compatible agent (e.g. acp:opencode)",
         "grpc:<addr>  OpenClaude gRPC server (e.g. grpc:localhost:50051)",
         "pty:<cmd>    PTY fallback for any CLI agent (e.g. pty:opencode)",
@@ -592,6 +646,19 @@ fleet:
 "#;
         let spec = FleetSpec::from_yaml(yaml).unwrap();
         assert_eq!(spec.fleet.sessions["oc"].driver, DriverKind::OpenClaude);
+    }
+
+    #[test]
+    fn parses_opencode_driver_kind() {
+        let yaml = r#"
+fleet:
+  base_branch: main
+  sessions:
+    oc: { driver: opencode }
+  start: oc
+"#;
+        let spec = FleetSpec::from_yaml(yaml).unwrap();
+        assert_eq!(spec.fleet.sessions["oc"].driver, DriverKind::OpenCode);
     }
 
     #[test]
