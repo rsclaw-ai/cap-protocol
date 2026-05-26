@@ -482,13 +482,13 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
     }
 }
 
-/// Parse a fenced `cap-subtasks` block — a JSON array of strings — out of agent
-/// text. The fence is three backticks; the delimiter is built at runtime so
-/// this source stays free of literal triple-backticks.
 /// Hard cap on subtasks per fan-out to bound allocations from runaway agent
 /// output. 256 is generous for any realistic decomposition.
 const MAX_SUBTASKS: usize = 256;
 
+/// Parse a fenced `cap-subtasks` block — a JSON array of strings — out of agent
+/// text. The fence is three backticks; the delimiter is built at runtime so
+/// this source stays free of literal triple-backticks.
 fn parse_subtasks(text: &str) -> Option<Vec<String>> {
     let fence = "`".repeat(3);
     let open = format!("{fence}cap-subtasks");

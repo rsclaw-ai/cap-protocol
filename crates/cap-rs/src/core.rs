@@ -370,6 +370,7 @@ pub enum ReverseRpcResult {
     /// Free-text response (e.g. `cap.user_io.input` result).
     TextResult { text: String },
 }
+
 /// One entry in an agent's published plan (spec §7.3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
