@@ -3,7 +3,6 @@ name        = "cap-rs"
 description = "Rust reference implementation of the CAP (CLI Agent Protocol)."
 version.workspace      = true
 edition.workspace      = true
-rust-version.workspace = true
 authors.workspace      = true
 homepage.workspace     = true
 repository.workspace   = true

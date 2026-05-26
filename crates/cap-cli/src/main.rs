@@ -50,6 +50,21 @@ enum Command {
     ListDrivers,
     /// Generate a default fleet.yaml template in the current directory.
     Init,
+    /// Interactive chat with one or more agents.
+    Chat {
+        /// Path to the fleet.yaml file (optional — auto-creates a single-agent
+        /// fleet if omitted).
+        path: Option<PathBuf>,
+        /// Task text (overrides `fleet.task` in the file).
+        #[arg(long)]
+        task: Option<String>,
+        /// Force fleet-wide bypass.
+        #[arg(long)]
+        bypass: bool,
+        /// Agent driver for auto-created fleets (requires `--model` for aider).
+        #[arg(long, default_value = "claude")]
+        driver: String,
+    },
     /// Run a fleet of collaborating agents described by a fleet.yaml.
     Run {
         /// Path to the fleet.yaml file.
@@ -84,6 +99,12 @@ async fn main() -> anyhow::Result<()> {
         Command::Validate { path } => cmd_validate(path),
         Command::ListDrivers => cmd_list_drivers(),
         Command::Init => cmd_init(),
+        Command::Chat {
+            path,
+            task,
+            bypass,
+            driver,
+        } => cmd_chat(path, task, bypass, driver).await,
         Command::Run {
             path,
             task,
@@ -126,6 +147,202 @@ fn cmd_init() -> anyhow::Result<()> {
     std::fs::write(&path, cap_rs_orchestrator::config::default_fleet_yaml())?;
     println!("✓ Created fleet.yaml");
     println!("  Edit it, then run: cap run fleet.yaml");
+    Ok(())
+}
+
+/// Interactive chat with one or more agents.
+async fn cmd_chat(
+    path: Option<PathBuf>,
+    task: Option<String>,
+    bypass: bool,
+    driver: String,
+) -> anyhow::Result<()> {
+    let (spec, effective_task, repo) = if let Some(p) = path {
+        let yaml = std::fs::read_to_string(&p)?;
+        let mut spec = FleetSpec::from_yaml(&yaml).map_err(|e| anyhow::anyhow!("{e}"))?;
+        if bypass {
+            eprintln!(
+                "⚠ --bypass: every agent will run with no permission gate.\n  \
+                 Worktree isolation still applies. Continue? [y/N]"
+            );
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            if !matches!(line.trim(), "y" | "Y" | "yes") {
+                eprintln!("Aborted.");
+                std::process::exit(0);
+            }
+            spec.fleet.permissions = PermissionPolicy::Bypass;
+            for session in spec.fleet.sessions.values_mut() {
+                session.permissions = None;
+            }
+        }
+        spec.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let task = task
+            .or_else(|| spec.fleet.task.clone())
+            .ok_or_else(|| anyhow::anyhow!("no task: pass --task or set fleet.task"))?;
+        let repo = p.parent().map(|p| {
+            if p.as_os_str().is_empty() {
+                std::env::current_dir().unwrap_or_default()
+            } else {
+                p.to_path_buf()
+            }
+        })
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        (spec, task, repo)
+    } else {
+        // Auto-create a single-agent fleet.yaml
+        let yaml = format!(
+            r#"fleet:
+  base_branch: main
+  sessions:
+    agent: {{ driver: {driver} }}
+  start: agent
+"#
+        );
+        let spec = FleetSpec::from_yaml(&yaml).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let task = task.ok_or_else(|| anyhow::anyhow!("pass --task or provide a fleet.yaml"))?;
+        (spec, task, std::env::current_dir().unwrap_or_default())
+    };
+
+    let sessions = spec.fleet.sessions.clone();
+    let (handle, mut events) = cap_rs_orchestrator::run(spec, repo, &effective_task)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let control = handle.control_sender();
+    let ctrl_c_control = control.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            eprintln!();
+            let _ = ctrl_c_control.send(OrchestratorControl::Cancel).await;
+        }
+    });
+
+    let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(256);
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(tokio::io::stdin()).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if stdin_tx.send(line).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    println!("=== cap chat ===");
+    println!("Type @agent msg to send a message, /help for commands\n");
+
+    let mut saw_fleet_complete = false;
+    loop {
+        tokio::select! {
+            ev = events.recv() => {
+                let Some(ev) = ev else { break };
+                match ev {
+                    OrchestratorEvent::SessionStarted { session } => {
+                        println!("  \x1b[1m{session}\x1b[0m joined");
+                    }
+                    OrchestratorEvent::Agent { session, event } => {
+                        match event {
+                            cap_rs::core::AgentEvent::TextChunk { text, .. } => {
+                                print!("\x1b[36m[{session}]\x1b[0m {text}");
+                            }
+                            cap_rs::core::AgentEvent::Thought { text, .. } => {
+                                print!("\x1b[2m[{session}] {text}\x1b[0m");
+                            }
+                            cap_rs::core::AgentEvent::ToolCallStart { name, .. } => {
+                                println!("\x1b[33m⚡ {session} uses {name}\x1b[0m");
+                            }
+                            cap_rs::core::AgentEvent::ToolCallEnd { output, .. } => {
+                                for line in output.lines().take(3) {
+                                    println!("\x1b[33m  └ {line}\x1b[0m");
+                                }
+                            }
+                            cap_rs::core::AgentEvent::Done { .. } => {
+                                // newline after streaming text
+                                println!();
+                            }
+                            cap_rs::core::AgentEvent::Error { message, .. } => {
+                                println!("\x1b[31m✗ {session} error: {message}\x1b[0m");
+                            }
+                            _ => {}
+                        }
+                    }
+                    OrchestratorEvent::SessionDone { session, stop_reason } => {
+                        println!("\x1b[2m  {session} done ({stop_reason:?})\x1b[0m");
+                    }
+                    OrchestratorEvent::SessionFailed { session, error } => {
+                        println!("\x1b[31m  {session} failed: {error}\x1b[0m");
+                    }
+                    OrchestratorEvent::Ask { session, req_id, tool, risk_level } => {
+                        println!("\x1b[33m⚠ {session} wants to use {tool} (risk: {risk_level:?})\x1b[0m");
+                        // Read from our stdin channel instead of stdin directly
+                        let line = stdin_rx.recv().await.unwrap_or_default();
+                        let allow = matches!(line.trim(), "y" | "Y" | "yes");
+                        handle.decide(session, req_id, allow).await;
+                    }
+                    OrchestratorEvent::FleetComplete => {
+                        println!("\n=== chat ended ===");
+                        saw_fleet_complete = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            line = stdin_rx.recv() => {
+                let Some(line) = line else { continue };
+                let line = line.trim().to_string();
+                if line.is_empty() { continue; }
+
+                if line.starts_with('/') {
+                    match line.as_str() {
+                        "/q" | "/quit" | "/exit" => {
+                            println!("bye");
+                            let _ = control.send(OrchestratorControl::Cancel).await;
+                            break;
+                        }
+                        "/help" | "/h" => {
+                            println!("Commands:");
+                            println!("  @agent msg   send message to agent");
+                            println!("  /quit        exit chat");
+                            println!("  /help        this help");
+                            println!("  /agents      list agents");
+                        }
+                        "/agents" | "/a" => {
+                            for (id, s) in &sessions {
+                                println!("  \x1b[1m{id}\x1b[0m — {:?}", s.driver);
+                            }
+                        }
+                        _ => {
+                            println!("unknown command: {line} (try /help)");
+                        }
+                    }
+                    continue;
+                }
+
+                // Parse @target message or send to the first/last active session
+                if let Some(rest) = line.strip_prefix('@')
+                    && let Some((session, msg)) = rest.split_once([' ', ':'])
+                    && !msg.trim().is_empty()
+                {
+                    let _ = control.send(OrchestratorControl::UserMessage {
+                        session: session.trim().to_string(),
+                        text: msg.trim().to_string(),
+                    }).await;
+                    continue;
+                }
+                // Bare message: send to first session
+                if let Some(first) = sessions.keys().next() {
+                    let _ = control.send(OrchestratorControl::UserMessage {
+                        session: first.clone(),
+                        text: line,
+                    }).await;
+                }
+            }
+        }
+    }
+
+    if !saw_fleet_complete {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
@@ -304,16 +521,14 @@ async fn cmd_run(
                     break;
                 }
                 // @session_name: message or @session_name message
-                if let Some(rest) = line.strip_prefix('@') {
-                    if let Some((session, msg)) = rest.split_once([' ', ':']) {
-                        let msg = msg.trim();
-                        if !msg.is_empty() {
-                            let _ = control.send(OrchestratorControl::UserMessage {
-                                session: session.trim().to_string(),
-                                text: msg.to_string(),
-                            }).await;
-                        }
-                    }
+                if let Some(rest) = line.strip_prefix('@')
+                    && let Some((session, msg)) = rest.split_once([' ', ':'])
+                    && !msg.trim().is_empty()
+                {
+                    let _ = control.send(OrchestratorControl::UserMessage {
+                        session: session.trim().to_string(),
+                        text: msg.trim().to_string(),
+                    }).await;
                 }
             }
         }

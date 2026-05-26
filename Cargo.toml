@@ -23,9 +23,8 @@ members = [
 # ---------------------------------------------------------------------------
 
 [workspace.package]
-version      = "0.0.1"
+version      = "0.1.0"
 edition      = "2024"
-rust-version = "1.85"
 authors      = ["rsclaw <team@rsclaw.ai>"]
 homepage     = "https://cap-protocol.org"
 repository   = "https://github.com/rsclaw-ai/cap-protocol"

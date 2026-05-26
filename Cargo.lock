@@ -191,9 +191,10 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cap-cli"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cap-rs",
  "cap-rs-orchestrator",
  "clap",
  "tokio",
@@ -202,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "cap-rs"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -224,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "cap-rs-orchestrator"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",

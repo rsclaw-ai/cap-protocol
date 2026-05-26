@@ -3,7 +3,6 @@ name        = "cap-cli"
 description = "cap command-line tool — discover, drive, and orchestrate CLI AI agents."
 version.workspace      = true
 edition.workspace      = true
-rust-version.workspace = true
 authors.workspace      = true
 homepage.workspace     = true
 repository.workspace   = true
@@ -13,6 +12,7 @@ categories.workspace   = true
 readme = "README.md"
 
 [dependencies]
+cap-rs = { path = "../cap-rs" }
 cap-rs-orchestrator = { path = "../cap-rs-orchestrator" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "signal"] }
 anyhow = "1"
