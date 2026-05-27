@@ -17,6 +17,7 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use cap_rs::driver::Driver;
+use cap_rs::driver::a2a::A2aDriver;
 use cap_rs::driver::acp::AcpDriver;
 use cap_rs::driver::codex_mcp::CodexMcpDriver;
 use cap_rs::driver::grpc::GrpcDriver;
@@ -88,6 +89,12 @@ impl DriverFactory for RealDriverFactory {
                     .sandbox(sandbox)
                     .spawn()
                     .await?;
+                Ok(Box::new(driver))
+            }
+            // a2a:<url> — remote A2A HTTPS+SSE CAP-compatible agent.
+            // Permission policy is enforced by the remote peer.
+            DriverKind::A2a(endpoint) => {
+                let driver = A2aDriver::connect(endpoint.clone()).await?;
                 Ok(Box::new(driver))
             }
             // grpc:<addr> — OpenClaude gRPC server (openclaude grpc).

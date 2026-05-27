@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 use serde::Deserialize;
+use url::Url;
 
 use crate::OrchestratorError;
 
@@ -93,7 +94,7 @@ impl SessionSpec {
 }
 
 fn driver_kind_from_manifest(path: &str) -> Option<DriverKind> {
-    use cap_rs::manifest::{AgentManifest, BindingKind};
+    use cap_rs::manifest::AgentManifest;
 
     let manifest = AgentManifest::from_path(path)
         .or_else(|_| {
@@ -105,6 +106,14 @@ fn driver_kind_from_manifest(path: &str) -> Option<DriverKind> {
             )
         })
         .ok()?;
+    driver_kind_from_agent_manifest(&manifest)
+}
+
+fn driver_kind_from_agent_manifest(
+    manifest: &cap_rs::manifest::AgentManifest,
+) -> Option<DriverKind> {
+    use cap_rs::manifest::BindingKind;
+
     for binding in manifest.binding_preferences() {
         match binding {
             BindingKind::Grpc => {
@@ -128,7 +137,7 @@ fn driver_kind_from_manifest(path: &str) -> Option<DriverKind> {
             }
             BindingKind::A2aHttpsSse => {
                 if let Some(url) = manifest.fast_path.a2a_serve_at.url() {
-                    return Some(DriverKind::Pty(url.to_string()));
+                    return Some(DriverKind::A2a(url.to_string()));
                 }
             }
             BindingKind::Pty => {
@@ -167,6 +176,8 @@ pub enum DriverKind {
     Aider,
     /// Structured Agent Client Protocol agent (e.g. `acp:opencode`).
     Acp(String),
+    /// A2A HTTPS+SSE endpoint (e.g. `a2a:http://127.0.0.1:4000`).
+    A2a(String),
     /// OpenClaude gRPC server (e.g. `grpc:localhost:50051`).
     Grpc(String),
     Pty(String),
@@ -176,23 +187,51 @@ impl DriverKind {
     /// Parse a driver kind from its string representation (reverse of the
     /// display/deserialization format).
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "claude" => Some(DriverKind::Claude),
-            "openclaude" => Some(DriverKind::OpenClaude),
-            "codex" => Some(DriverKind::Codex),
-            "opencode" => Some(DriverKind::OpenCode),
-            "aider" => Some(DriverKind::Aider),
-            _ => s
-                .strip_prefix("grpc:")
-                .map(|addr| DriverKind::Grpc(addr.to_string()))
-                .or_else(|| {
-                    s.strip_prefix("acp:")
-                        .map(|cmd| DriverKind::Acp(cmd.to_string()))
-                })
-                .or_else(|| {
-                    s.strip_prefix("pty:")
-                        .map(|cmd| DriverKind::Pty(cmd.to_string()))
-                }),
+        parse_driver_kind(s).ok()
+    }
+}
+
+fn parse_driver_kind(s: &str) -> Result<DriverKind, String> {
+    match s {
+        "claude" => Ok(DriverKind::Claude),
+        "openclaude" => Ok(DriverKind::OpenClaude),
+        "codex" => Ok(DriverKind::Codex),
+        "opencode" => Ok(DriverKind::OpenCode),
+        "aider" => Ok(DriverKind::Aider),
+        other => {
+            if let Some(addr) = other.strip_prefix("grpc:") {
+                if !valid_grpc_address(addr) {
+                    return Err(format!(
+                        "invalid grpc address '{addr}' — expected host:port (e.g. 'localhost:50051')"
+                    ));
+                }
+                Ok(DriverKind::Grpc(addr.to_string()))
+            } else if let Some(url) = other.strip_prefix("a2a:") {
+                if !valid_a2a_url(url) {
+                    return Err(format!(
+                        "invalid a2a url '{url}' — expected http(s)://host[:port][/path]"
+                    ));
+                }
+                Ok(DriverKind::A2a(url.to_string()))
+            } else if let Some(cmd) = other.strip_prefix("acp:") {
+                if cmd.is_empty() || !valid_binary_name(cmd) {
+                    return Err(format!(
+                        "invalid acp command '{cmd}' — expected a binary name"
+                    ));
+                }
+                Ok(DriverKind::Acp(cmd.to_string()))
+            } else if let Some(cmd) = other.strip_prefix("pty:") {
+                if cmd.is_empty() || !valid_binary_name(cmd) {
+                    return Err(format!(
+                        "invalid pty command '{cmd}' — expected a binary name"
+                    ));
+                }
+                Ok(DriverKind::Pty(cmd.to_string()))
+            } else {
+                Err(format!(
+                    "unknown driver kind '{other}' (expected claude | openclaude | codex | opencode | aider | grpc:<host:port> | a2a:<http-url> | acp:<cmd> | pty:<cmd>)"
+                ))
+            }
         }
     }
 }
@@ -200,41 +239,7 @@ impl DriverKind {
 impl<'de> Deserialize<'de> for DriverKind {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
-        Ok(match s.as_str() {
-            "claude" => DriverKind::Claude,
-            "openclaude" => DriverKind::OpenClaude,
-            "codex" => DriverKind::Codex,
-            "opencode" => DriverKind::OpenCode,
-            "aider" => DriverKind::Aider,
-            other => {
-                if let Some(addr) = other.strip_prefix("grpc:") {
-                    if !valid_grpc_address(addr) {
-                        return Err(serde::de::Error::custom(format!(
-                            "invalid grpc address '{addr}' — expected host:port (e.g. 'localhost:50051')"
-                        )));
-                    }
-                    DriverKind::Grpc(addr.to_string())
-                } else if let Some(cmd) = other.strip_prefix("acp:") {
-                    if cmd.is_empty() || !valid_binary_name(cmd) {
-                        return Err(serde::de::Error::custom(format!(
-                            "invalid acp command '{cmd}' — expected a binary name"
-                        )));
-                    }
-                    DriverKind::Acp(cmd.to_string())
-                } else if let Some(cmd) = other.strip_prefix("pty:") {
-                    if cmd.is_empty() || !valid_binary_name(cmd) {
-                        return Err(serde::de::Error::custom(format!(
-                            "invalid pty command '{cmd}' — expected a binary name"
-                        )));
-                    }
-                    DriverKind::Pty(cmd.to_string())
-                } else {
-                    return Err(serde::de::Error::custom(format!(
-                        "unknown driver kind '{other}' (expected claude | openclaude | codex | opencode | aider | grpc:<host:port> | acp:<cmd> | pty:<cmd>)"
-                    )));
-                }
-            }
-        })
+        parse_driver_kind(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -246,6 +251,7 @@ pub fn list_driver_kinds() -> Vec<&'static str> {
         "codex        OpenAI Codex CLI (MCP)",
         "opencode     OpenCode CLI (stream-json, Claude Code-compatible)",
         "aider        Aider chat via PTY (https://github.com/paul-gauthier/aider)",
+        "a2a:<url>    A2A HTTPS+SSE endpoint (e.g. a2a:http://127.0.0.1:4000)",
         "acp:<cmd>    Any ACP-compatible agent (e.g. acp:opencode)",
         "grpc:<addr>  OpenClaude gRPC server (e.g. grpc:localhost:50051)",
         "pty:<cmd>    PTY fallback for any CLI agent (e.g. pty:opencode)",
@@ -446,6 +452,18 @@ fn valid_grpc_address(addr: &str) -> bool {
     // Host: alphanumeric, dots, hyphens, underscores, or IPv6 brackets.
     host.chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '[' | ']' | ':'))
+}
+
+fn valid_a2a_url(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return false;
+    };
+    matches!(parsed.scheme(), "http" | "https")
+        && parsed
+            .host_str()
+            .is_some_and(|host| !host.is_empty() && !host.starts_with('-') && !host.contains(".."))
+        && parsed.password().is_none()
+        && parsed.username().is_empty()
 }
 
 /// Safe git ref: non-empty, no `..`, no leading `-`, chars limited to
@@ -1013,6 +1031,80 @@ fleet:
         }
     }
 
+    #[test]
+    fn parses_a2a_driver_with_valid_url() {
+        let yaml = r#"
+fleet:
+  base_branch: main
+  sessions:
+    agent: { driver: "a2a:http://127.0.0.1:4000/agent" }
+  start: agent
+"#;
+        let spec = FleetSpec::from_yaml(yaml).unwrap();
+        assert_eq!(
+            spec.fleet.sessions["agent"].driver,
+            Some(DriverKind::A2a("http://127.0.0.1:4000/agent".into()))
+        );
+        spec.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_a2a_driver_with_invalid_url() {
+        for bad in [
+            "",
+            "localhost:4000",
+            "ftp://localhost",
+            "http://user@host",
+            "http://..",
+        ] {
+            let yaml = format!(
+                "fleet:\n  base_branch: main\n  sessions:\n    a: {{ driver: \"a2a:{bad}\" }}\n  start: a\n"
+            );
+            let result = FleetSpec::from_yaml(&yaml);
+            assert!(result.is_err(), "url '{bad}' should be rejected");
+        }
+    }
+
+    #[test]
+    fn manifest_a2a_fast_path_resolves_to_a2a_driver() {
+        let manifest = cap_rs::manifest::AgentManifest::from_toml_str(
+            r#"
+[cap]
+protocol_version = "1.0"
+
+[agent]
+name = "remote"
+binary = "remote-agent"
+args = []
+profiles = []
+
+[startup]
+command = ["remote-agent"]
+ready_when = { pattern = "ready" }
+
+[agent.io]
+transport = "a2a_https_sse"
+
+[fast_path]
+a2a_serve_at = "https://agent.example.test/a2a"
+
+[pty]
+cols = 80
+rows = 24
+
+[capabilities]
+streaming_output = true
+input_modalities = ["text"]
+output_modalities = ["text"]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            driver_kind_from_agent_manifest(&manifest),
+            Some(DriverKind::A2a("https://agent.example.test/a2a".into()))
+        );
+    }
     #[test]
     fn accepts_grpc_with_ip_address() {
         let yaml = r#"

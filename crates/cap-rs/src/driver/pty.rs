@@ -912,9 +912,6 @@ pub struct PtyDriver {
     /// Grace period between SIGTERM and SIGKILL for `Cancel { Session }`.
     hard_cancel_grace: Duration,
 
-    /// Emit `cap.pty.raw_bytes` alongside parsed events.
-    include_raw_bytes: bool,
-
     /// Parser-supplied gate, written on each `Prompt` so a quiescence parser
     /// knows the conversation started and can confirm the prompt submitted.
     /// `None` when the parser does no prompt gating.
@@ -1272,7 +1269,6 @@ impl PtyDriverBuilder {
             child_killer,
             process_id,
             hard_cancel_grace,
-            include_raw_bytes,
             prompt_gate,
         })
     }

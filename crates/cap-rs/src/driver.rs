@@ -39,10 +39,11 @@ pub mod a2a;
     feature = "pty",
     feature = "codex",
     feature = "acp",
-    feature = "grpc"
+    feature = "grpc",
+    feature = "a2a"
 ))]
 mod common {
-    use crate::core::{AgentEvent, ClientFrame};
+    use crate::core::{AgentEvent, ClientFrame, Content};
 
     /// A unified driver interface. Concrete drivers translate this to their
     /// underlying wire format (PTY, stream-json, gRPC, ACP-stdio, A2A SSE).
@@ -124,6 +125,17 @@ mod common {
         AgentError { code: String, message: String },
     }
 
+    pub fn text_content(content: &[Content], separator: &str) -> String {
+        content
+            .iter()
+            .filter_map(|part| match part {
+                Content::Text { text } => Some(text.as_str()),
+                Content::Image { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join(separator)
+    }
+
     #[cfg(feature = "stream-json")]
     impl From<serde_json::Error> for DriverError {
         fn from(e: serde_json::Error) -> Self {
@@ -137,6 +149,7 @@ mod common {
     feature = "pty",
     feature = "codex",
     feature = "acp",
-    feature = "grpc"
+    feature = "grpc",
+    feature = "a2a"
 ))]
-pub use common::{Driver, DriverError, DriverExitStatus};
+pub use common::{Driver, DriverError, DriverExitStatus, text_content};

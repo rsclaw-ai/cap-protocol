@@ -35,9 +35,10 @@ pty          = ["dep:portable-pty", "dep:vt100", "dep:regex-lite", "dep:tokio", 
 stream-json  = ["dep:tokio", "dep:tokio-util", "dep:async-trait", "dep:thiserror", "dep:tracing"]
 codex        = ["dep:tokio", "dep:async-trait", "dep:thiserror", "dep:tracing"]
 acp          = ["dep:tokio", "dep:async-trait", "dep:thiserror", "dep:tracing"]
-a2a          = []
+a2a          = ["dep:tokio", "dep:async-trait", "dep:thiserror", "dep:tracing", "dep:reqwest", "dep:futures-util"]
 grpc         = ["dep:tokio", "dep:tokio-stream", "dep:async-trait", "dep:thiserror", "dep:tracing", "dep:tonic", "dep:prost", "dep:tonic-build"]
 orchestrator = []
+testing      = []
 
 full         = ["pty", "stream-json", "codex", "acp", "a2a", "grpc", "orchestrator"]
 
@@ -52,6 +53,8 @@ tokio        = { version = "1", features = ["process", "io-util", "rt", "rt-mult
 async-trait  = { version = "0.1",                        optional = true }
 thiserror    = { version = "2",                          optional = true }
 tracing      = { version = "0.1",                        optional = true }
+futures-util = { version = "0.3", optional = true }
+reqwest      = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
 
 # stream-json specific.
 tokio-util   = { version = "0.7", features = ["codec"],  optional = true }
