@@ -14,9 +14,6 @@ pub mod pty;
 pub mod codex;
 
 #[cfg(feature = "codex")]
-pub mod codex_app_server;
-
-#[cfg(feature = "codex")]
 pub mod codex_mcp;
 
 #[cfg(feature = "acp")]
