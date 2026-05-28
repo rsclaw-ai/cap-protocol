@@ -10,7 +10,7 @@ use crate::OrchestratorError;
 use crate::config::{DriverKind, PermissionPolicy, SessionId};
 use crate::event::OrchestratorEvent;
 use crate::factory::DriverFactory;
-use crate::session::{SessionHandle, spawn_session};
+use crate::session::{SessionHandle, spawn_chat_session, spawn_session};
 use crate::worktree::WorktreeManager;
 
 #[derive(Debug, Default)]
@@ -40,6 +40,59 @@ impl SessionRegistry {
         bus: &mpsc::Sender<OrchestratorEvent>,
         cancel: &CancellationToken,
     ) -> Result<(), OrchestratorError> {
+        self.spawn_with_mode(
+            id,
+            kind,
+            policy,
+            base_branch,
+            factory,
+            worktree,
+            bus,
+            cancel,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_chat(
+        &mut self,
+        id: SessionId,
+        kind: &DriverKind,
+        policy: PermissionPolicy,
+        base_branch: &str,
+        factory: &dyn DriverFactory,
+        worktree: &dyn WorktreeManager,
+        bus: &mpsc::Sender<OrchestratorEvent>,
+        cancel: &CancellationToken,
+    ) -> Result<(), OrchestratorError> {
+        self.spawn_with_mode(
+            id,
+            kind,
+            policy,
+            base_branch,
+            factory,
+            worktree,
+            bus,
+            cancel,
+            true,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_with_mode(
+        &mut self,
+        id: SessionId,
+        kind: &DriverKind,
+        policy: PermissionPolicy,
+        base_branch: &str,
+        factory: &dyn DriverFactory,
+        worktree: &dyn WorktreeManager,
+        bus: &mpsc::Sender<OrchestratorEvent>,
+        cancel: &CancellationToken,
+        chat_mode: bool,
+    ) -> Result<(), OrchestratorError> {
         let cwd = worktree.create(&id, base_branch)?;
         let driver = match factory.build(&id, kind, &cwd, policy).await {
             Ok(d) => d,
@@ -48,7 +101,11 @@ impl SessionRegistry {
                 return Err(e);
             }
         };
-        let handle = spawn_session(id.clone(), driver, policy, cwd, bus.clone(), cancel.clone());
+        let handle = if chat_mode {
+            spawn_chat_session(id.clone(), driver, policy, cwd, bus.clone(), cancel.clone())
+        } else {
+            spawn_session(id.clone(), driver, policy, cwd, bus.clone(), cancel.clone())
+        };
         self.sessions.insert(id, handle);
         Ok(())
     }

@@ -25,11 +25,34 @@ pub struct SessionHandle {
 /// exits, the inbox closes, or the cancel token fires.
 pub fn spawn_session(
     id: SessionId,
+    driver: Box<dyn Driver>,
+    policy: PermissionPolicy,
+    cwd: PathBuf,
+    bus: mpsc::Sender<OrchestratorEvent>,
+    cancel: CancellationToken,
+) -> SessionHandle {
+    spawn_session_with_options(id, driver, policy, cwd, bus, cancel, false)
+}
+
+pub fn spawn_chat_session(
+    id: SessionId,
+    driver: Box<dyn Driver>,
+    policy: PermissionPolicy,
+    cwd: PathBuf,
+    bus: mpsc::Sender<OrchestratorEvent>,
+    cancel: CancellationToken,
+) -> SessionHandle {
+    spawn_session_with_options(id, driver, policy, cwd, bus, cancel, true)
+}
+
+fn spawn_session_with_options(
+    id: SessionId,
     mut driver: Box<dyn Driver>,
     policy: PermissionPolicy,
     cwd: PathBuf,
     bus: mpsc::Sender<OrchestratorEvent>,
     cancel: CancellationToken,
+    keep_alive_after_done: bool,
 ) -> SessionHandle {
     let (inbox_tx, mut inbox_rx) = mpsc::channel::<ClientFrame>(256);
 
@@ -134,7 +157,16 @@ pub fn spawn_session(
         tracing::info!(session = %id, "prompt sent, entering pump_turn");
 
         // Pump events until this turn ends (Done or error/cancel).
-        let _ = pump_turn(&id, &mut driver, policy, &bus, &mut inbox_rx, &cancel).await;
+        let _ = pump_turn(
+            &id,
+            &mut driver,
+            policy,
+            &bus,
+            &mut inbox_rx,
+            &cancel,
+            keep_alive_after_done,
+        )
+        .await;
     });
 
     SessionHandle {
@@ -165,7 +197,9 @@ async fn pump_turn(
     bus: &mpsc::Sender<OrchestratorEvent>,
     inbox_rx: &mut mpsc::Receiver<ClientFrame>,
     cancel: &CancellationToken,
+    keep_alive_after_done: bool,
 ) {
+    let mut awaiting_prompt = false;
     loop {
         tracing::debug!(session = %id, "waiting for next event");
         enum PumpInput {
@@ -177,7 +211,7 @@ async fn pump_turn(
             biased;
             _ = cancel.cancelled() => PumpInput::Cancelled,
             frame = inbox_rx.recv() => PumpInput::Inbox(frame),
-            ev = driver.next_event() => PumpInput::DriverEvent(ev),
+            ev = driver.next_event(), if !awaiting_prompt => PumpInput::DriverEvent(ev),
         };
 
         let ev = match input {
@@ -189,6 +223,7 @@ async fn pump_turn(
                 if let ClientFrame::SessionConfig(_) = frame {
                     continue;
                 }
+                awaiting_prompt = false;
                 if let Err(e) = driver.send(frame).await {
                     bus_send(
                         bus,
@@ -236,9 +271,10 @@ async fn pump_turn(
                     cancel,
                 )
                 .await;
-                // A `Done` event is terminal for this session: the driver has
-                // finished its work. Exit the actor so callers awaiting `join`
-                // are not blocked. Multi-turn use-cases open a fresh session.
+                if keep_alive_after_done {
+                    awaiting_prompt = true;
+                    continue;
+                }
                 return;
             }
             AgentEvent::PermissionRequest {
@@ -637,6 +673,40 @@ mod tests {
             }
         }
         assert!(saw_done);
+    }
+
+    #[tokio::test]
+    async fn chat_session_waits_for_next_prompt_after_done() {
+        let driver = Box::new(StubDriver::new("a").done(StopReason::EndTurn));
+        let (bus_tx, mut bus_rx) = mpsc::channel(64);
+        let token = CancellationToken::new();
+        let handle = spawn_chat_session(
+            "a".into(),
+            driver,
+            PermissionPolicy::Allow,
+            test_cwd(),
+            bus_tx,
+            token.clone(),
+        );
+        handle.inbox.send(prompt("go")).await.unwrap();
+
+        let mut saw_done = false;
+        while let Some(ev) = bus_rx.recv().await {
+            if let OrchestratorEvent::SessionDone { .. } = ev {
+                saw_done = true;
+                break;
+            }
+        }
+        assert!(saw_done);
+
+        let next = tokio::time::timeout(std::time::Duration::from_millis(100), bus_rx.recv()).await;
+        assert!(
+            next.is_err(),
+            "chat session should wait silently after Done"
+        );
+
+        token.cancel();
+        handle.join.await.unwrap();
     }
 
     #[tokio::test]

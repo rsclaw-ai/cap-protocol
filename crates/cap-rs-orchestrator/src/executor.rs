@@ -90,7 +90,21 @@ impl Executor {
         W: WorktreeManager + 'static,
     {
         let strategy = StaticRouting::new(spec.fleet.routes.clone());
-        Self::start_with_strategy(spec, factory, worktree, task, strategy).await
+        Self::start_with_mode(spec, factory, worktree, task, strategy, false).await
+    }
+
+    pub async fn start_chat<F, W>(
+        spec: FleetSpec,
+        factory: F,
+        worktree: W,
+        task: &str,
+    ) -> Result<(ExecutorHandle, mpsc::Receiver<OrchestratorEvent>), OrchestratorError>
+    where
+        F: DriverFactory + 'static,
+        W: WorktreeManager + 'static,
+    {
+        let strategy = StaticRouting::new(spec.fleet.routes.clone());
+        Self::start_with_mode(spec, factory, worktree, task, strategy, true).await
     }
 
     /// Start the fleet with a custom routing strategy.
@@ -100,6 +114,22 @@ impl Executor {
         worktree: W,
         task: &str,
         strategy: S,
+    ) -> Result<(ExecutorHandle, mpsc::Receiver<OrchestratorEvent>), OrchestratorError>
+    where
+        F: DriverFactory + 'static,
+        W: WorktreeManager + 'static,
+        S: RoutingStrategy,
+    {
+        Self::start_with_mode(spec, factory, worktree, task, strategy, false).await
+    }
+
+    async fn start_with_mode<F, W, S>(
+        spec: FleetSpec,
+        factory: F,
+        worktree: W,
+        task: &str,
+        strategy: S,
+        chat_mode: bool,
     ) -> Result<(ExecutorHandle, mpsc::Receiver<OrchestratorEvent>), OrchestratorError>
     where
         F: DriverFactory + 'static,
@@ -138,6 +168,7 @@ impl Executor {
                 out: out_tx,
                 bus_tx,
                 cancel,
+                chat_mode,
             };
             run.drive(bus_rx, control_rx).await;
         });
@@ -166,6 +197,7 @@ struct Run<F: DriverFactory, W: WorktreeManager> {
     out: mpsc::Sender<OrchestratorEvent>,
     bus_tx: mpsc::Sender<OrchestratorEvent>,
     cancel: CancellationToken,
+    chat_mode: bool,
 }
 
 impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
@@ -232,20 +264,34 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
         policy: PermissionPolicy,
     ) -> bool {
         let base = &self.spec.fleet.base_branch;
-        match self
-            .registry
-            .spawn(
-                id.clone(),
-                kind,
-                policy,
-                base,
-                &self.factory,
-                &self.worktree,
-                &self.bus_tx,
-                &self.cancel,
-            )
-            .await
-        {
+        let spawn_result = if self.chat_mode {
+            self.registry
+                .spawn_chat(
+                    id.clone(),
+                    kind,
+                    policy,
+                    base,
+                    &self.factory,
+                    &self.worktree,
+                    &self.bus_tx,
+                    &self.cancel,
+                )
+                .await
+        } else {
+            self.registry
+                .spawn(
+                    id.clone(),
+                    kind,
+                    policy,
+                    base,
+                    &self.factory,
+                    &self.worktree,
+                    &self.bus_tx,
+                    &self.cancel,
+                )
+                .await
+        };
+        match spawn_result {
             Ok(()) => {
                 self.spawned.insert(id.clone());
                 true
@@ -281,7 +327,7 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
         }
 
         // If nothing is pending (e.g. all start sessions failed to spawn), finish now.
-        if self.fleet_complete() {
+        if !self.chat_mode && self.fleet_complete() {
             let _ = self.out.send(OrchestratorEvent::FleetComplete).await;
             self.registry.shutdown().await;
             return;
@@ -346,6 +392,9 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                             // may see SessionFailed instead if routing (e.g. by_subtask)
                             // fails. on_session_done sends the appropriate event.
                             if self.on_session_done(&session, stop_reason).await {
+                                if self.chat_mode {
+                                    continue;
+                                }
                                 let _ = self.out.send(OrchestratorEvent::FleetComplete).await;
                                 break;
                             }
@@ -353,6 +402,9 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                         ev @ OrchestratorEvent::SessionFailed { .. } => {
                             let _ = self.out.send(ev).await;
                             if self.fleet_complete() {
+                                if self.chat_mode {
+                                    continue;
+                                }
                                 let _ = self.out.send(OrchestratorEvent::FleetComplete).await;
                                 break;
                             }
@@ -590,6 +642,43 @@ mod tests {
     use crate::config::FleetSpec;
     use crate::testing::{StubDriver, StubDriverFactory};
     use crate::worktree::NoopWorktreeManager;
+
+    #[tokio::test]
+    async fn chat_mode_keeps_single_session_alive_after_done() {
+        let spec = FleetSpec::from_yaml(
+            r#"
+fleet:
+  base_branch: main
+  sessions:
+    agent: { driver: claude, permissions: allow }
+  start: agent
+"#,
+        )
+        .unwrap();
+        let factory = StubDriverFactory::new().with(
+            "agent",
+            StubDriver::new("agent").done(cap_rs::core::StopReason::EndTurn),
+        );
+        let (_handle, mut events) =
+            Executor::start_chat(spec, factory, NoopWorktreeManager::new(), "say READY")
+                .await
+                .unwrap();
+
+        let mut saw_done = false;
+        while let Some(ev) = events.recv().await {
+            match ev {
+                OrchestratorEvent::SessionDone { session, .. } => {
+                    saw_done = session == "agent";
+                    break;
+                }
+                OrchestratorEvent::FleetComplete => {
+                    panic!("chat mode should not complete after first turn")
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_done);
+    }
 
     #[tokio::test]
     async fn budget_exceeded_cancels_fleet() {

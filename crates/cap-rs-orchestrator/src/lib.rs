@@ -53,6 +53,22 @@ pub async fn run(
     Executor::start(spec, RealDriverFactory, worktree, task).await
 }
 
+/// Convenience façade: run an interactive chat fleet against real CLI agents in `repo`.
+pub async fn chat(
+    spec: FleetSpec,
+    repo: impl AsRef<std::path::Path>,
+    task: &str,
+) -> Result<
+    (
+        ExecutorHandle,
+        tokio::sync::mpsc::Receiver<OrchestratorEvent>,
+    ),
+    OrchestratorError,
+> {
+    let worktree = GitWorktreeManager::new(repo);
+    Executor::start_chat(spec, RealDriverFactory, worktree, task).await
+}
+
 /// Convenience façade: run a fleet with a custom routing strategy.
 pub async fn run_with_strategy<S>(
     spec: FleetSpec,

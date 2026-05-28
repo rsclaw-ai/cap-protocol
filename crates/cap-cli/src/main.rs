@@ -96,12 +96,8 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing subscriber for debug logging
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("cap_rs=debug".parse().unwrap()),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_target(false)
         .with_thread_ids(false)
         .with_file(false)
@@ -252,7 +248,7 @@ async fn cmd_chat(
     };
 
     let sessions = spec.fleet.sessions.clone();
-    let (handle, mut events) = cap_rs_orchestrator::run(spec, repo, &effective_task)
+    let (handle, mut events) = cap_rs_orchestrator::chat(spec, repo, &effective_task)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 

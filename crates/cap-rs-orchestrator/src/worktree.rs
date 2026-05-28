@@ -14,7 +14,7 @@ pub trait WorktreeManager: Send + Sync {
     fn cleanup(&self, session: &str) -> Result<(), OrchestratorError>;
 }
 
-/// Real implementation: `git worktree add <root>/.cap/<session> -b cap/<session> <base>`.
+/// Real implementation: one git worktree at `<root>/.cap/<session>` on branch `cap/<session>`.
 #[derive(Debug, Clone)]
 pub struct GitWorktreeManager {
     repo: PathBuf,
@@ -65,9 +65,17 @@ impl WorktreeManager for GitWorktreeManager {
             self.git(&["commit", "-qm", "init"])?;
         }
         let dir = self.dir_for(session);
+        if dir.join(".git").exists() {
+            return Ok(dir);
+        }
         let dir_str = dir.to_string_lossy().to_string();
         let branch = format!("cap/{session}");
-        self.git(&["worktree", "add", "-b", &branch, &dir_str, base_branch])?;
+        let branch_ref = format!("refs/heads/{branch}");
+        if self.git(&["rev-parse", "--verify", &branch_ref]).is_ok() {
+            self.git(&["worktree", "add", &dir_str, &branch])?;
+        } else {
+            self.git(&["worktree", "add", "-b", &branch, &dir_str, base_branch])?;
+        }
         Ok(dir)
     }
 
@@ -115,6 +123,27 @@ impl WorktreeManager for NoopWorktreeManager {
 mod tests {
     use super::*;
 
+    fn init_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        run_git(repo.path(), &["init", "-q", "-b", "main"]);
+        run_git(repo.path(), &["config", "user.email", "t@t"]);
+        run_git(repo.path(), &["config", "user.name", "t"]);
+        std::fs::write(repo.path().join("f.txt"), "x").unwrap();
+        run_git(repo.path(), &["add", "."]);
+        run_git(repo.path(), &["commit", "-qm", "init"]);
+        repo
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
     #[test]
     fn noop_returns_distinct_dirs_per_session() {
         let wt = NoopWorktreeManager::new();
@@ -128,22 +157,7 @@ mod tests {
 
     #[test]
     fn git_creates_a_worktree_off_base_branch() {
-        let repo = tempfile::tempdir().unwrap();
-        let run = |args: &[&str]| {
-            let ok = std::process::Command::new("git")
-                .args(args)
-                .current_dir(repo.path())
-                .status()
-                .unwrap()
-                .success();
-            assert!(ok, "git {args:?} failed");
-        };
-        run(&["init", "-q", "-b", "main"]);
-        run(&["config", "user.email", "t@t"]);
-        run(&["config", "user.name", "t"]);
-        std::fs::write(repo.path().join("f.txt"), "x").unwrap();
-        run(&["add", "."]);
-        run(&["commit", "-qm", "init"]);
+        let repo = init_repo();
 
         let wt = GitWorktreeManager::new(repo.path());
         let dir = wt.create("worker", "main").unwrap();
@@ -153,5 +167,50 @@ mod tests {
         );
         wt.cleanup("worker").unwrap();
         assert!(!dir.exists(), "cleanup should remove the worktree dir");
+    }
+
+    #[test]
+    fn git_reuses_session_branch_after_cleanup() {
+        let repo = init_repo();
+
+        let wt = GitWorktreeManager::new(repo.path());
+        let first = wt.create("worker", "main").unwrap();
+        wt.cleanup("worker").unwrap();
+
+        let second = wt.create("worker", "main").unwrap();
+
+        assert_eq!(first, second);
+        assert!(second.join("f.txt").exists());
+    }
+
+    #[test]
+    fn git_reuses_live_session_worktree() {
+        let repo = init_repo();
+
+        let wt = GitWorktreeManager::new(repo.path());
+        let first = wt.create("worker", "main").unwrap();
+
+        let second = wt.create("worker", "main").unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn git_reuses_existing_session_branch_without_deleting_commits() {
+        let repo = init_repo();
+
+        let wt = GitWorktreeManager::new(repo.path());
+        let first = wt.create("worker", "main").unwrap();
+        std::fs::write(first.join("state.txt"), "preserved").unwrap();
+        run_git(&first, &["add", "state.txt"]);
+        run_git(&first, &["commit", "-qm", "preserve worker state"]);
+        wt.cleanup("worker").unwrap();
+
+        let second = wt.create("worker", "main").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(second.join("state.txt")).unwrap(),
+            "preserved"
+        );
     }
 }
