@@ -3,7 +3,7 @@
 //! - `claude` → `stream-json`
 //! - `openclaude` → `stream-json` (Anthropic SDK-compatible)
 //! - `opencode` → `stream-json` (Claude Code-compatible NDJSON)
-//! - `codex` → `codex mcp-server` (stdio MCP)
+//! - `codex` → `stream-json` (Claude Code-compatible NDJSON)
 //! - `acp:<cmd>` → ACP over stdio
 //!
 //! `pty:<cmd>` remains the universal screen-scraping fallback; `pty:codex`
@@ -19,7 +19,6 @@ use async_trait::async_trait;
 use cap_rs::driver::Driver;
 use cap_rs::driver::a2a::A2aDriver;
 use cap_rs::driver::acp::AcpDriver;
-use cap_rs::driver::codex_mcp::CodexMcpDriver;
 use cap_rs::driver::grpc::GrpcDriver;
 use cap_rs::driver::pty::{PtyDriver, TuiParser};
 use cap_rs::driver::stream_json::ClaudeCodeDriver;
@@ -71,22 +70,13 @@ impl DriverFactory for RealDriverFactory {
                 let driver = ClaudeCodeDriver::opencode_builder(cwd).spawn().await?;
                 Ok(Box::new(driver))
             }
-            // codex: stdio MCP server (`codex mcp-server`). Structured streaming
-            // — codex/event notifications mid-turn, clean structuredContent on
-            // the tools/call response — no TUI chrome, no idle heuristics. Map
-            // CAP's permission policy onto codex's approval-policy + sandbox.
-            // The old PTY codex (with the tuned TuiParser) is still available
-            // as `pty:codex`.
+            // codex: modified local build with Claude Code-compatible stream-json.
+            // Same persistent multi-turn behavior as claude/openclaude. The
+            // old PTY codex path remains available as `pty:codex`.
             DriverKind::Codex => {
-                let (approval, sandbox) = match policy {
-                    PermissionPolicy::Bypass => ("never", "danger-full-access"),
-                    PermissionPolicy::Allow => ("never", "workspace-write"),
-                    PermissionPolicy::Deny => ("never", "read-only"),
-                    PermissionPolicy::Ask => ("on-request", "workspace-write"),
-                };
-                let driver = CodexMcpDriver::builder(cwd)
-                    .approval_policy(approval)
-                    .sandbox(sandbox)
+                let driver = ClaudeCodeDriver::builder(cwd)
+                    .bin("codex")
+                    .dangerously_skip_permissions(bypass)
                     .spawn()
                     .await?;
                 Ok(Box::new(driver))
@@ -142,6 +132,37 @@ impl DriverFactory for RealDriverFactory {
                 let driver = builder.spawn(parser)?;
                 Ok(Box::new(driver))
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cap_rs::driver::DriverError;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn codex_defaults_to_stream_json_driver_family() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = RealDriverFactory;
+        let result = factory
+            .build(
+                &"codex".to_string(),
+                &DriverKind::Codex,
+                temp.path(),
+                PermissionPolicy::Ask,
+            )
+            .await;
+
+        match result {
+            Err(OrchestratorError::Driver(DriverError::BinaryNotFound(bin))) => {
+                assert_eq!(bin, "codex");
+            }
+            Ok(mut driver) => {
+                driver.shutdown().await.unwrap();
+            }
+            Err(err) => panic!("unexpected error: {err}"),
         }
     }
 }

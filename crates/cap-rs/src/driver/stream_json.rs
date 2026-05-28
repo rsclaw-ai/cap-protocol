@@ -1,12 +1,13 @@
-//! Stream-JSON driver — fast-path for Claude Code SDK and openclaude.
+//! Stream-JSON driver — fast-path for Claude Code SDK and compatible CLIs.
 //!
 //! Wire format: line-delimited JSON over the agent process's stdio.
 //! Each line is one JSON object; messages flow bidirectionally.
 //!
 //! Spec mapping: see [docs/cap-v1.md §6.2 + Appendix C.1](https://github.com/rsclaw-ai/cap-protocol/blob/main/docs/cap-v1.md).
 //!
-//! Supported agent today:
+//! Supported agents today:
 //! - **Claude Code** via `claude -p --input-format=stream-json --output-format=stream-json`
+//! - **Codex** via the same Claude-compatible stream-json shape
 //!
 //! openclaude and other Anthropic-SDK-compatible CLIs should also work
 //! with `ClaudeCodeDriver::builder(cwd).bin("openclaude").spawn()`.

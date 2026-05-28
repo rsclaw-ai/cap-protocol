@@ -248,7 +248,7 @@ pub fn list_driver_kinds() -> Vec<&'static str> {
     vec![
         "claude       Claude Code CLI (stream-json)",
         "openclaude   OpenClaude CLI (stream-json, Anthropic SDK-compatible)",
-        "codex        OpenAI Codex CLI (MCP)",
+        "codex        OpenAI Codex CLI (stream-json, Claude Code-compatible)",
         "opencode     OpenCode CLI (stream-json, Claude Code-compatible)",
         "aider        Aider chat via PTY (https://github.com/paul-gauthier/aider)",
         "a2a:<url>    A2A HTTPS+SSE endpoint (e.g. a2a:http://127.0.0.1:4000)",

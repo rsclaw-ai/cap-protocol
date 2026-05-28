@@ -28,20 +28,10 @@ engine: runs N collaborating CLI agents in one process from a declarative
     no TUI chrome, none of the PTY hacks needed. Wire format verified against real
     `opencode acp` v1.14. This is the high-fidelity opencode path; `pty:opencode` remains
     as a fallback.
-  - **codex** → **MCP** (`codex mcp-server`, `CodexMcpDriver`): stdio JSON-RPC 2.0 with
-    codex's `codex` tool. The `tools/call` response carries `structuredContent:{threadId,
-    content}` (the clean final assistant message) AND during the turn codex emits its rich
-    streaming vocabulary as **`codex/event`** notifications — `agent_message_content_delta`
-    → `TextChunk`, `item_started`/`completed` (Reasoning, AgentMessage, command/MCP tool
-    calls) → `ToolCall*`, `token_count` → `Usage`. The reader dedups streaming vs the
-    response's `structuredContent` (one TextChunk per turn, not two). Permission gating
-    via CAP's `PermissionPolicy` → codex's `approval-policy`+`sandbox` (Bypass →
-    `never`+`danger-full-access`, Allow → `never`+`workspace-write`, etc.). **Fleet-
-    validated** (`codex → claude`): codex answered "hello" cleanly, no TUI chrome, no
-    SessionStart-hook scrollback — full structured replacement for the PTY path. Wire
-    format verified against real `codex mcp-server` v0.133; the upstream WS blocker still
-    exists but codex auto-falls-back to HTTPS. `pty:codex` (with the tuned `TuiParser`)
-    remains available as the screen-scraping fallback.
+  - **codex** → `stream-json` (modified local Codex build, Claude Code-compatible
+    NDJSON). This is the high-fidelity codex path for `driver: codex`; `pty:codex`
+    remains available as the screen-scraping fallback, and `codex_mcp.rs` remains
+    as a lower-level backend implementation but is not the default driver mapping.
 - **PTY floor (universal fallback):** `pty:<cmd>` goes through the PTY path with a
   turn-completion heuristic — `TuiParser` (hybrid:
   **idle-settle + ready-marker + prompt-sent gate**). A TUI emits no structured `Done`,
