@@ -4,7 +4,8 @@
 use std::path::PathBuf;
 
 use cap_rs::core::{
-    AgentEvent, ClientFrame, PermissionDecision, PermissionMode, ReverseRpcResult, SessionConfig,
+    AgentEvent, CancelScope, ClientFrame, PermissionDecision, PermissionMode, ReverseRpcResult,
+    SessionConfig,
 };
 use cap_rs::driver::Driver;
 use tokio::sync::mpsc;
@@ -21,6 +22,15 @@ pub struct SessionHandle {
     pub join: JoinHandle<()>,
 }
 
+/// Per-session config to thread from orchestrator → session actor.
+#[derive(Debug, Clone, Default)]
+pub struct SessionSpawnConfig {
+    pub model: Option<String>,
+    pub system_prompt: Option<String>,
+    pub max_turns: Option<u32>,
+    pub budget_usd: Option<f64>,
+}
+
 /// Spawn the actor task. Returns immediately; the task runs until its driver
 /// exits, the inbox closes, or the cancel token fires.
 pub fn spawn_session(
@@ -30,8 +40,9 @@ pub fn spawn_session(
     cwd: PathBuf,
     bus: mpsc::Sender<OrchestratorEvent>,
     cancel: CancellationToken,
+    spawn_cfg: SessionSpawnConfig,
 ) -> SessionHandle {
-    spawn_session_with_options(id, driver, policy, cwd, bus, cancel, false)
+    spawn_session_with_options(id, driver, policy, cwd, bus, cancel, false, spawn_cfg)
 }
 
 pub fn spawn_chat_session(
@@ -41,10 +52,12 @@ pub fn spawn_chat_session(
     cwd: PathBuf,
     bus: mpsc::Sender<OrchestratorEvent>,
     cancel: CancellationToken,
+    spawn_cfg: SessionSpawnConfig,
 ) -> SessionHandle {
-    spawn_session_with_options(id, driver, policy, cwd, bus, cancel, true)
+    spawn_session_with_options(id, driver, policy, cwd, bus, cancel, true, spawn_cfg)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_session_with_options(
     id: SessionId,
     mut driver: Box<dyn Driver>,
@@ -53,6 +66,7 @@ fn spawn_session_with_options(
     bus: mpsc::Sender<OrchestratorEvent>,
     cancel: CancellationToken,
     keep_alive_after_done: bool,
+    spawn_cfg: SessionSpawnConfig,
 ) -> SessionHandle {
     let (inbox_tx, mut inbox_rx) = mpsc::channel::<ClientFrame>(256);
 
@@ -71,7 +85,11 @@ fn spawn_session_with_options(
         // the session actor's launch context and sent first.
         let frame = tokio::select! {
             biased;
-            _ = cancel.cancelled() => { let _ = driver.shutdown().await; return; }
+            _ = cancel.cancelled() => {
+                let _ = driver.send(ClientFrame::Cancel { scope: CancelScope::Session, reason: Some("orchestrator_cancel".into()) }).await;
+                let _ = driver.shutdown().await;
+                return;
+            }
             maybe = inbox_rx.recv() => match maybe {
                 Some(f) => f,
                 None => { let _ = driver.shutdown().await; return; }
@@ -85,6 +103,10 @@ fn spawn_session_with_options(
         };
         let mut config = SessionConfig::new(cwd);
         config.permission_mode = permission_mode;
+        config.model = spawn_cfg.model;
+        config.system_prompt = spawn_cfg.system_prompt;
+        config.max_turns = spawn_cfg.max_turns;
+        config.budget_usd = spawn_cfg.budget_usd;
         if let Err(e) = driver.send(ClientFrame::SessionConfig(config)).await {
             tracing::error!(session = %id, error = %e, "failed to send session config");
             bus_send(
@@ -108,7 +130,11 @@ fn spawn_session_with_options(
             loop {
                 let ev = tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => { let _ = driver.shutdown().await; return; }
+                    _ = cancel.cancelled() => {
+                        let _ = driver.send(ClientFrame::Cancel { scope: CancelScope::Session, reason: Some("orchestrator_cancel".into()) }).await;
+                        let _ = driver.shutdown().await;
+                        return;
+                    }
                     ev = driver.next_event() => ev,
                 };
                 match ev {
@@ -216,6 +242,7 @@ async fn pump_turn(
 
         let ev = match input {
             PumpInput::Cancelled => {
+                let _ = driver.send(ClientFrame::Cancel { scope: CancelScope::Session, reason: Some("orchestrator_cancel".into()) }).await;
                 let _ = driver.shutdown().await;
                 return;
             }
@@ -318,7 +345,11 @@ async fn pump_turn(
                         // also checks cancellation before blocking on inbox_rx.
                         tokio::select! {
                             biased;
-                            _ = cancel.cancelled() => { let _ = driver.shutdown().await; return; }
+                            _ = cancel.cancelled() => {
+                                let _ = driver.send(ClientFrame::Cancel { scope: CancelScope::Session, reason: Some("orchestrator_cancel".into()) }).await;
+                                let _ = driver.shutdown().await;
+                                return;
+                            }
                             maybe = inbox_rx.recv() => match maybe {
                                 Some(ClientFrame::PermissionResponse { decision, .. }) => decision,
                                 _ => PermissionDecision::Deny,
@@ -362,7 +393,11 @@ async fn pump_turn(
                 // Wait for the consumer to respond.
                 let result = tokio::select! {
                     biased;
-                    _ = cancel.cancelled() => { let _ = driver.shutdown().await; return; }
+                    _ = cancel.cancelled() => {
+                        let _ = driver.send(ClientFrame::Cancel { scope: CancelScope::Session, reason: Some("orchestrator_cancel".into()) }).await;
+                        let _ = driver.shutdown().await;
+                        return;
+                    }
                     maybe = inbox_rx.recv() => match maybe {
                         Some(ClientFrame::ReverseRpcResult { result, .. }) => result,
                         _ => ReverseRpcResult::Success { ok: false },
@@ -370,6 +405,55 @@ async fn pump_turn(
                 };
                 if let Err(e) = driver
                     .send(ClientFrame::ReverseRpcResult { rpc_id, result })
+                    .await
+                {
+                    bus_send(
+                        bus,
+                        OrchestratorEvent::SessionFailed {
+                            session: id.clone(),
+                            error: e.to_string(),
+                        },
+                        cancel,
+                    )
+                    .await;
+                    return;
+                }
+            }
+            AgentEvent::AskUser {
+                ref ask_id,
+                ref prompt,
+                ref ask_kind,
+                ref options,
+                ..
+            } => {
+                let ask_id = ask_id.clone();
+                bus_send(
+                    bus,
+                    OrchestratorEvent::AskUser {
+                        session: id.clone(),
+                        ask_id: ask_id.clone(),
+                        prompt: prompt.clone(),
+                        ask_kind: ask_kind.clone(),
+                        options: options.clone(),
+                    },
+                    cancel,
+                )
+                .await;
+                // Wait for the consumer to answer.
+                let value = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        let _ = driver.send(ClientFrame::Cancel { scope: CancelScope::Session, reason: Some("orchestrator_cancel".into()) }).await;
+                        let _ = driver.shutdown().await;
+                        return;
+                    }
+                    maybe = inbox_rx.recv() => match maybe {
+                        Some(ClientFrame::AskUserAnswer { value, .. }) => value,
+                        _ => serde_json::Value::Null,
+                    }
+                };
+                if let Err(e) = driver
+                    .send(ClientFrame::AskUserAnswer { ask_id, value })
                     .await
                 {
                     bus_send(
@@ -403,6 +487,17 @@ async fn pump_turn(
 mod tests {
     use super::*;
     use crate::config::PermissionPolicy;
+
+    fn spawn_test_session(
+        id: SessionId,
+        driver: Box<dyn Driver>,
+        policy: PermissionPolicy,
+        cwd: PathBuf,
+        bus: mpsc::Sender<OrchestratorEvent>,
+        cancel: CancellationToken,
+    ) -> SessionHandle {
+        spawn_session(id, driver, policy, cwd, bus, cancel, SessionSpawnConfig::default())
+    }
     use crate::event::OrchestratorEvent;
     use crate::testing::StubDriver;
     use cap_rs::core::{ClientFrame, Content, PermissionDecision, RiskLevel, StopReason};
@@ -424,7 +519,7 @@ mod tests {
         let driver = Box::new(StubDriver::new("a").text("hi").done(StopReason::EndTurn));
         let (bus_tx, mut bus_rx) = mpsc::channel(64);
         let token = CancellationToken::new();
-        let handle = spawn_session(
+        let handle = spawn_test_session(
             "a".into(),
             driver,
             PermissionPolicy::Allow,
@@ -468,7 +563,7 @@ mod tests {
         );
         let (bus_tx, mut bus_rx) = mpsc::channel(64);
         let token = CancellationToken::new();
-        let handle = spawn_session(
+        let handle = spawn_test_session(
             "a".into(),
             driver,
             PermissionPolicy::Allow,
@@ -505,7 +600,7 @@ mod tests {
         );
         let (bus_tx, mut bus_rx) = mpsc::channel(64);
         let token = CancellationToken::new();
-        let handle = spawn_session(
+        let handle = spawn_test_session(
             "a".into(),
             driver,
             PermissionPolicy::Allow,
@@ -535,7 +630,7 @@ mod tests {
         let driver = Box::new(StubDriver::new("a").await_ready().text("noise"));
         let (bus_tx, mut bus_rx) = mpsc::channel(64);
         let token = CancellationToken::new();
-        let handle = spawn_session(
+        let handle = spawn_test_session(
             "a".into(),
             driver,
             PermissionPolicy::Allow,
@@ -569,7 +664,7 @@ mod tests {
         );
         let (bus_tx, mut bus_rx) = mpsc::channel(64);
         let token = CancellationToken::new();
-        let handle = spawn_session(
+        let handle = spawn_test_session(
             "a".into(),
             driver,
             PermissionPolicy::Allow,
@@ -599,7 +694,7 @@ mod tests {
         );
         let (bus_tx, mut bus_rx) = mpsc::channel(64);
         let token = CancellationToken::new();
-        let handle = spawn_session(
+        let handle = spawn_test_session(
             "a".into(),
             driver,
             PermissionPolicy::Allow,
@@ -642,7 +737,7 @@ mod tests {
         );
         let (bus_tx, mut bus_rx) = mpsc::channel(64);
         let token = CancellationToken::new();
-        let handle = spawn_session(
+        let handle = spawn_test_session(
             "a".into(),
             driver,
             PermissionPolicy::Ask,
@@ -687,6 +782,7 @@ mod tests {
             test_cwd(),
             bus_tx,
             token.clone(),
+            SessionSpawnConfig::default(),
         );
         handle.inbox.send(prompt("go")).await.unwrap();
 
@@ -720,7 +816,7 @@ mod tests {
         );
         let (bus_tx, mut bus_rx) = mpsc::channel(64);
         let token = CancellationToken::new();
-        let handle = spawn_session(
+        let handle = spawn_test_session(
             "a".into(),
             driver,
             PermissionPolicy::Allow,

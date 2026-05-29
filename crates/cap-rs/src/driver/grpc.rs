@@ -97,6 +97,12 @@ async fn run_stream(
             message: e.to_string(),
         })?;
 
+    // Extract session_id from the first frame before converting to proto.
+    let session_id = match &first_frame {
+        ClientFrame::SessionConfig(cfg) => cfg.session_resume_id.clone(),
+        _ => None,
+    };
+
     // Build the first message and a stream for subsequent ones.
     let first_msg = frame_to_client_message(first_frame);
     let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel::<ClientMessage>();
@@ -116,6 +122,15 @@ async fn run_stream(
             code: "STREAM".into(),
             message: e.to_string(),
         })?;
+
+    // Emit cap.session.ready — the stream is established.
+    let _ = event_tx
+        .send(AgentEvent::Ready {
+            session_id,
+            version: crate::core::CAP_PROTOCOL_VERSION.to_string(),
+            model: None,
+        })
+        .await;
 
     // Spawn writer for subsequent frames.
     let write_handle = tokio::spawn(async move {
@@ -243,10 +258,12 @@ fn translate_server_message(msg: ServerMessage) -> Result<Option<AgentEvent>, Dr
                 ..Default::default()
             },
         })),
-        Some(Event::Error(err)) => Err(DriverError::AgentError {
+        Some(Event::Error(err)) => Ok(Some(AgentEvent::Error {
             code: err.code,
             message: err.message,
-        }),
+            retryable: false,
+            details: None,
+        })),
         None => Ok(None),
     }
 }
@@ -284,6 +301,6 @@ impl Driver for GrpcDriver {
     }
 
     fn prompt_after_ready(&self) -> bool {
-        false
+        true
     }
 }

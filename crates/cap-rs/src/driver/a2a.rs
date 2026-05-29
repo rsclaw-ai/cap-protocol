@@ -251,7 +251,7 @@ impl A2aDriver {
 
         let mut pending = VecDeque::new();
         pending.push_back(AgentEvent::Ready {
-            session_id: card.name,
+            session_id: Some(card.name),
             version: crate::core::CAP_PROTOCOL_VERSION.to_string(),
             model: None,
         });

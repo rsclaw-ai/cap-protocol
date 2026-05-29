@@ -16,6 +16,7 @@ use crate::config::{DriverKind, FleetSpec, PermissionPolicy, SessionId};
 use crate::event::{OrchestratorControl, OrchestratorEvent};
 use crate::factory::DriverFactory;
 use crate::registry::SessionRegistry;
+use crate::session::SessionSpawnConfig;
 use crate::routing::{RouteDecision, RoutingContext, RoutingStrategy, StaticRouting};
 use crate::worktree::WorktreeManager;
 
@@ -264,6 +265,19 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
         policy: PermissionPolicy,
     ) -> bool {
         let base = &self.spec.fleet.base_branch;
+        // Build per-session config from session spec + fleet-level budget.
+        let spawn_cfg = self
+            .spec
+            .fleet
+            .sessions
+            .get(id)
+            .map(|s| SessionSpawnConfig {
+                model: s.model.clone(),
+                system_prompt: s.system_prompt.clone(),
+                max_turns: s.max_turns,
+                budget_usd: self.spec.fleet.budget_usd,
+            })
+            .unwrap_or_default();
         let spawn_result = if self.chat_mode {
             self.registry
                 .spawn_chat(
@@ -275,6 +289,7 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                     &self.worktree,
                     &self.bus_tx,
                     &self.cancel,
+                    spawn_cfg,
                 )
                 .await
         } else {
@@ -288,6 +303,7 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                     &self.worktree,
                     &self.bus_tx,
                     &self.cancel,
+                    spawn_cfg,
                 )
                 .await
         };
@@ -451,6 +467,16 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
                         &session,
                         ClientFrame::PermissionResponse { req_id, decision },
                     )
+                    .await;
+            }
+            OrchestratorControl::AskUserResponse {
+                session,
+                ask_id,
+                value,
+            } => {
+                let _ = self
+                    .registry
+                    .route(&session, ClientFrame::AskUserAnswer { ask_id, value })
                     .await;
             }
             OrchestratorControl::Cancel => self.cancel.cancel(),

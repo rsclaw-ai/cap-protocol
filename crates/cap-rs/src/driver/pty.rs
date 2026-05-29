@@ -345,7 +345,7 @@ impl ReplParser {
                 } else {
                     self.seen_first_prompt = true;
                     events.push(AgentEvent::Ready {
-                        session_id: format!("{}-pid{}", self.name, std::process::id()),
+                        session_id: Some(format!("{}-pid{}", self.name, std::process::id())),
                         version: crate::core::CAP_PROTOCOL_VERSION.into(),
                         model: None,
                     });
@@ -476,7 +476,7 @@ impl AgentParser for ReplParser {
                 } else {
                     self.seen_first_prompt = true;
                     events.push(AgentEvent::Ready {
-                        session_id: format!("{}-pid{}", self.name, std::process::id()),
+                        session_id: Some(format!("{}-pid{}", self.name, std::process::id())),
                         version: crate::core::CAP_PROTOCOL_VERSION.into(),
                         model: None,
                     });
@@ -803,7 +803,7 @@ impl AgentParser for TuiParser {
             if !self.seen_first_ready {
                 self.seen_first_ready = true;
                 return vec![AgentEvent::Ready {
-                    session_id: format!("{}-pid{}", self.name, std::process::id()),
+                    session_id: Some(format!("{}-pid{}", self.name, std::process::id())),
                     version: crate::core::CAP_PROTOCOL_VERSION.into(),
                     model: None,
                 }];

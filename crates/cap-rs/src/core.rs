@@ -186,7 +186,8 @@ pub enum AgentEvent {
     /// Session has been initialized and is ready to accept prompts.
     #[serde(rename = "cap.session.ready")]
     Ready {
-        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         #[serde(default = "default_version")]
         version: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -10,7 +10,7 @@ use crate::OrchestratorError;
 use crate::config::{DriverKind, PermissionPolicy, SessionId};
 use crate::event::OrchestratorEvent;
 use crate::factory::DriverFactory;
-use crate::session::{SessionHandle, spawn_chat_session, spawn_session};
+use crate::session::{SessionHandle, SessionSpawnConfig, spawn_chat_session, spawn_session};
 use crate::worktree::WorktreeManager;
 
 #[derive(Debug, Default)]
@@ -39,6 +39,7 @@ impl SessionRegistry {
         worktree: &dyn WorktreeManager,
         bus: &mpsc::Sender<OrchestratorEvent>,
         cancel: &CancellationToken,
+        spawn_cfg: SessionSpawnConfig,
     ) -> Result<(), OrchestratorError> {
         self.spawn_with_mode(
             id,
@@ -50,6 +51,7 @@ impl SessionRegistry {
             bus,
             cancel,
             false,
+            spawn_cfg,
         )
         .await
     }
@@ -65,6 +67,7 @@ impl SessionRegistry {
         worktree: &dyn WorktreeManager,
         bus: &mpsc::Sender<OrchestratorEvent>,
         cancel: &CancellationToken,
+        spawn_cfg: SessionSpawnConfig,
     ) -> Result<(), OrchestratorError> {
         self.spawn_with_mode(
             id,
@@ -76,6 +79,7 @@ impl SessionRegistry {
             bus,
             cancel,
             true,
+            spawn_cfg,
         )
         .await
     }
@@ -92,6 +96,7 @@ impl SessionRegistry {
         bus: &mpsc::Sender<OrchestratorEvent>,
         cancel: &CancellationToken,
         chat_mode: bool,
+        spawn_cfg: SessionSpawnConfig,
     ) -> Result<(), OrchestratorError> {
         let cwd = worktree.create(&id, base_branch)?;
         let driver = match factory.build(&id, kind, &cwd, policy).await {
@@ -102,9 +107,9 @@ impl SessionRegistry {
             }
         };
         let handle = if chat_mode {
-            spawn_chat_session(id.clone(), driver, policy, cwd, bus.clone(), cancel.clone())
+            spawn_chat_session(id.clone(), driver, policy, cwd, bus.clone(), cancel.clone(), spawn_cfg)
         } else {
-            spawn_session(id.clone(), driver, policy, cwd, bus.clone(), cancel.clone())
+            spawn_session(id.clone(), driver, policy, cwd, bus.clone(), cancel.clone(), spawn_cfg)
         };
         self.sessions.insert(id, handle);
         Ok(())
@@ -171,6 +176,7 @@ mod tests {
             &wt,
             &bus_tx,
             &cancel,
+            SessionSpawnConfig::default(),
         )
         .await
         .unwrap();

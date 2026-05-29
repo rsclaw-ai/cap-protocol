@@ -624,7 +624,7 @@ fn handle_codex_event(
                 }
                 if !ready_emitted.swap(true, Ordering::Relaxed) {
                     return vec![AgentEvent::Ready {
-                        session_id: tid.to_string(),
+                        session_id: Some(tid.to_string()),
                         version: crate::core::CAP_PROTOCOL_VERSION.into(),
                         model: model.clone(),
                     }];
@@ -806,7 +806,7 @@ mod tests {
         );
         assert_eq!(events.len(), 1);
         assert!(
-            matches!(&events[0], AgentEvent::Ready { session_id, model, .. } if session_id == "abc" && model.is_none())
+            matches!(&events[0], AgentEvent::Ready { session_id, model, .. } if session_id.as_deref() == Some("abc") && model.is_none())
         );
         assert_eq!(tid.lock().unwrap().clone(), Some("abc".into()));
     }

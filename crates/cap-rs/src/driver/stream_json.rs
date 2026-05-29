@@ -416,6 +416,10 @@ impl Driver for ClaudeCodeDriver {
     fn exit_status(&self) -> Option<DriverExitStatus> {
         self.exit_status.lock().ok().and_then(|g| g.clone())
     }
+
+    fn prompt_after_ready(&self) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -582,8 +586,7 @@ fn parse_stream_frame(frame: &Value) -> Vec<AgentEvent> {
                 session_id: frame
                     .get("session_id")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
+                    .map(str::to_string),
                 version: crate::core::CAP_PROTOCOL_VERSION.into(),
                 model: frame.get("model").and_then(Value::as_str).map(String::from),
             }],
@@ -694,9 +697,41 @@ fn parse_stream_frame(frame: &Value) -> Vec<AgentEvent> {
         }
 
         "result" => {
-            let usage = parse_usage(frame);
-            let stop_reason = usage.stop_reason.unwrap_or(StopReason::EndTurn);
-            vec![AgentEvent::Done { stop_reason, usage }]
+            let subtype = frame
+                .get("subtype")
+                .and_then(Value::as_str)
+                .unwrap_or("success");
+            if subtype.starts_with("error") {
+                let error = frame.get("error").cloned().unwrap_or(Value::Null);
+                let code = error
+                    .get("type")
+                    .or_else(|| error.get("code"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
+                let message = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("agent error")
+                    .to_string();
+                let usage = parse_usage(frame);
+                vec![
+                    AgentEvent::Error {
+                        code,
+                        message,
+                        retryable: false,
+                        details: Some(error),
+                    },
+                    AgentEvent::Done {
+                        stop_reason: StopReason::Error,
+                        usage,
+                    },
+                ]
+            } else {
+                let usage = parse_usage(frame);
+                let stop_reason = usage.stop_reason.unwrap_or(StopReason::EndTurn);
+                vec![AgentEvent::Done { stop_reason, usage }]
+            }
         }
 
         "stream_event" => {

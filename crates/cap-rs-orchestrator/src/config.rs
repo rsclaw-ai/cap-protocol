@@ -70,6 +70,15 @@ pub struct SessionSpec {
     pub permissions: Option<PermissionPolicy>,
     /// Human-readable role description for LLM-driven orchestration (e.g. "code reviewer").
     pub role: Option<String>,
+    /// Model override for this session (maps to `cap.session.config.model`).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// System prompt override (maps to `cap.session.config.system_prompt`).
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    /// Max turns for this session (maps to `cap.session.config.max_turns`).
+    #[serde(default)]
+    pub max_turns: Option<u32>,
 }
 
 impl SessionSpec {

@@ -332,7 +332,7 @@ impl AcpBuilder {
         let model = extract_model(&new_resp);
         let _ = reader_tx
             .send(AgentEvent::Ready {
-                session_id: sid,
+                session_id: Some(sid),
                 version: crate::core::CAP_PROTOCOL_VERSION.into(),
                 model,
             })

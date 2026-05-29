@@ -51,7 +51,7 @@ impl StubDriver {
     /// Script a `Ready` event (e.g. a PTY agent finishing boot).
     pub fn ready(mut self) -> Self {
         self.queue.push_back(AgentEvent::Ready {
-            session_id: format!("{}-sess", self.name),
+            session_id: Some(format!("{}-sess", self.name)),
             version: CAP_PROTOCOL_VERSION.into(),
             model: None,
         });
