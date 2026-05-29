@@ -73,7 +73,7 @@ tonic        = { version = "0.12",                       optional = true }
 prost        = { version = "0.13",                       optional = true }
 
 [build-dependencies]
-tonic-build = { version = "0.12", optional = true }
+tonic-build = { version = "0.14", optional = true }
 
 [dev-dependencies]
 anyhow = "1.0.102"
