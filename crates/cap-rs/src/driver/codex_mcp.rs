@@ -632,6 +632,29 @@ fn handle_codex_event(
             }
             Vec::new()
         }
+        "agent_reasoning_delta" | "agent_reasoning_content_delta" => {
+            // Symmetric counterpart of `agent_message_content_delta` but
+            // for the reasoning channel. Codex may emit one or the
+            // other (or neither) depending on model + version. Forward
+            // as a Thought event so consumers get realtime visibility
+            // into the thinking phase instead of waiting for the
+            // `item_completed Reasoning` summary at the end of the
+            // 30-second think.
+            let delta = msg.get("delta").and_then(Value::as_str).unwrap_or("");
+            if delta.is_empty() {
+                Vec::new()
+            } else {
+                let item_id = msg
+                    .get("item_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("reasoning")
+                    .to_string();
+                vec![AgentEvent::Thought {
+                    msg_id: item_id,
+                    text: delta.to_string(),
+                }]
+            }
+        }
         "agent_message_content_delta" => {
             let delta = msg.get("delta").and_then(Value::as_str).unwrap_or("");
             if delta.is_empty() {
@@ -679,6 +702,35 @@ fn handle_codex_event(
                         input: item.get("arguments").cloned().unwrap_or(Value::Null),
                     }]
                 }
+                "Reasoning" | "reasoning" => {
+                    // Codex (and any reasoning-model backed by it) spends
+                    // most of a turn in this item. Pre-fix, the
+                    // `_ => Vec::new()` arm dropped these — the file
+                    // header advertised a `Thought (placeholder)` mapping
+                    // that wasn't actually implemented. Now we forward
+                    // the start of reasoning as a Thought event so
+                    // downstream chunkers (rsclaw IM streaming) can show
+                    // "💭 …" the moment codex begins thinking, instead
+                    // of 30+ seconds of silence.
+                    //
+                    // The item payload at `item_started` time often has
+                    // no text yet — codex provides the full reasoning
+                    // summary at `item_completed`. We surface whatever
+                    // we have (empty string fine — consumers can skip)
+                    // so consumers at least learn a Reasoning phase
+                    // started.
+                    let text = item
+                        .get("text")
+                        .or_else(|| item.get("summary"))
+                        .or_else(|| item.get("content"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    vec![AgentEvent::Thought {
+                        msg_id: item_id,
+                        text,
+                    }]
+                }
                 _ => Vec::new(),
             }
         }
@@ -691,6 +743,30 @@ fn handle_codex_event(
                 .unwrap_or("")
                 .to_string();
             match item_type {
+                "Reasoning" | "reasoning" => {
+                    // Reasoning finished — emit the full reasoning text
+                    // (codex puts the final summary here, not in
+                    // item_started). Consumers see the complete thought
+                    // bubble; if they prefer not to, they can filter on
+                    // their side. We always emit so it shows up on the
+                    // assistant_event bus for desktop UI consumers that
+                    // collapse-render thoughts.
+                    let text = item
+                        .get("text")
+                        .or_else(|| item.get("summary"))
+                        .or_else(|| item.get("content"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if text.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![AgentEvent::Thought {
+                            msg_id: item_id,
+                            text,
+                        }]
+                    }
+                }
                 "CommandExecution" | "command_execution" => {
                     let output = item
                         .get("output")

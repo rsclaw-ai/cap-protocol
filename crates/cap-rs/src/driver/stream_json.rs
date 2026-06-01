@@ -445,13 +445,33 @@ async fn reader_task(
     tx: mpsc::Sender<AgentEvent>,
     exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
+    // Track whether a real terminal `Done` event has been emitted by
+    // a parsed stream frame (claudecode's `{"type":"result"}`).
+    //
+    // Why this matters: opencode's `opencode run --output-format
+    // stream-json` is one-shot per process and DOES NOT emit a
+    // claudecode-style `result` terminator. It just streams its
+    // assistant messages and exits. Without a synthetic Done on EOF,
+    // CapLiveManager waits up to PROMPT_TIMEOUT (300s) for a Done
+    // that will never come — every opencode turn appears to "hang"
+    // 5 minutes after completion before erroring. With this synth,
+    // the EOF on opencode's stdout becomes the Done signal.
+    //
+    // claudecode normally emits `result` before EOF, so this synth
+    // only fires in pathological cases there (driver killed, sudden
+    // exit) where it's still the right behaviour — the upstream
+    // CapLiveManager waiter would otherwise hang forever.
+    let mut done_emitted = false;
     let mut lines = BufReader::new(stdout).lines();
     loop {
         match lines.next_line().await {
             Ok(Some(line)) => {
-                trace!(line = %line, "← claude");
+                trace!(line = %line, "← agent");
                 for event in parse_stream_line(&line, false) {
                     trace!(event = ?event, "parsed event");
+                    if matches!(event, AgentEvent::Done { .. }) {
+                        done_emitted = true;
+                    }
                     if tx.send(event).await.is_err() {
                         exited.store(true, std::sync::atomic::Ordering::Relaxed);
                         return;
@@ -460,11 +480,34 @@ async fn reader_task(
             }
             Ok(None) => {
                 debug!("reader: stdout EOF");
+                if !done_emitted {
+                    // Synthesise a Done so waiters don't hang. We
+                    // can't reconstruct full Usage from here, but
+                    // EndTurn + empty Usage is the right shape for
+                    // "session ended cleanly without a result frame"
+                    // (opencode's normal path) or "process disappeared
+                    // mid-turn" (claudecode crash).
+                    debug!("reader: synthesising Done on EOF (no result frame)");
+                    let _ = tx
+                        .send(AgentEvent::Done {
+                            stop_reason: StopReason::EndTurn,
+                            usage: Usage::default(),
+                        })
+                        .await;
+                }
                 exited.store(true, std::sync::atomic::Ordering::Relaxed);
                 return;
             }
             Err(e) => {
                 warn!(error = %e, "reader: read error");
+                if !done_emitted {
+                    let _ = tx
+                        .send(AgentEvent::Done {
+                            stop_reason: StopReason::Error,
+                            usage: Usage::default(),
+                        })
+                        .await;
+                }
                 exited.store(true, std::sync::atomic::Ordering::Relaxed);
                 return;
             }
