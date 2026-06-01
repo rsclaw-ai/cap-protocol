@@ -152,17 +152,30 @@ impl ClaudeCodeDriver {
         let mut cmd = Command::new(&bin);
 
         if is_opencode {
-            // OpenCode: `opencode run --output-format stream-json`
-            // Prompt is delivered via stdin (one stream-json frame),
-            // same protocol as Claude Code's stdin prompt delivery.
+            // OpenCode: `opencode run --output-format stream-json --persist`
+            // `--persist` keeps opencode alive across turns — without it,
+            // opencode reads ONE prompt then exits, which makes
+            // multi-turn `cap_live` sessions hit a 300s timeout on the
+            // second turn (no Done frame ever comes for the second
+            // prompt because the process is gone). The persist mode
+            // landed in opencode 1.15.16+ behind this flag; older
+            // binaries will reject `--persist` at argv parse time,
+            // which surfaces as `BinaryNotFound`-equivalent.
+            //
+            // Backward compatibility: cap-rs reader_task's EOF→Done
+            // synthesis still covers older opencode binaries
+            // running without --persist (single-shot mode); the only
+            // observable difference is that multi-turn sessions
+            // re-spawn the process each turn.
             cmd.arg("run")
                 .arg("--output-format")
                 .arg("stream-json")
+                .arg("--persist")
                 .current_dir(&cwd)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .kill_on_drop(false); // Don't kill on drop — let the process exit naturally
+                .kill_on_drop(true);
             if let Some(m) = &model {
                 cmd.arg("--model").arg(m);
             }
