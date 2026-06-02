@@ -205,7 +205,7 @@ impl ClaudeCodeDriver {
         let mut cmd = Command::new(&bin);
 
         if is_codex {
-            // Codex: `codex exec --input-format stream-json
+            // Codex: `codex exec [resume <thread_id>] --input-format stream-json
             //         --output-format stream-json --skip-git-repo-check
             //         --sandbox workspace-write`.
             //
@@ -217,13 +217,20 @@ impl ClaudeCodeDriver {
             // chunks, result), so the existing claudecode parser
             // handles them unchanged.
             //
+            // Resume: `codex exec resume <thread_id>` is a subcommand
+            // (not a flag) — codex picks the named thread off disk
+            // and replays its history into the new process's memory.
+            //
             // sandbox=workspace-write matches the prior codex_mcp
             // builder's default and is the right policy for cap_live
             // use (sub-agent runs inside its own cwd, no escape).
             // Permission-bypass (--dangerously-bypass-approvals-and-sandbox)
             // is opt-in via `.dangerously_skip_permissions(true)`.
-            cmd.arg("exec")
-                .arg("--input-format")
+            cmd.arg("exec");
+            if let Some(rid) = &resume {
+                cmd.arg("resume").arg(rid);
+            }
+            cmd.arg("--input-format")
                 .arg("stream-json")
                 .arg("--output-format")
                 .arg("stream-json")
@@ -268,6 +275,13 @@ impl ClaudeCodeDriver {
                 .kill_on_drop(true);
             if let Some(m) = &model {
                 cmd.arg("--model").arg(m);
+            }
+            // Resume an existing opencode session by id. opencode's
+            // `--session <id>` resumes that specific session's
+            // history; without it opencode creates a fresh session
+            // every spawn.
+            if let Some(rid) = &resume {
+                cmd.arg("--session").arg(rid);
             }
         } else {
             // Claude Code: `claude -p --input-format=stream-json --output-format=stream-json`
