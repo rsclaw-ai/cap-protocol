@@ -88,9 +88,11 @@ cap-protocol/
 └── LICENSE-CC-BY-4.0                   For all specification text
 ```
 
-Reference implementation crates and example manifests are
-**in progress**. The spec is the deliverable that matters for v1;
-the implementation makes it real for v2.
+The reference implementation is **functional**: `cap-rs` ships drivers
+for stream-json, PTY, ACP, A2A, and gRPC; `cap-rs-orchestrator` runs
+multi-agent fleets; and the `cap` CLI exposes `validate`, `list-drivers`,
+`init`, `manifest`, `chat`, and `run`. The spec remains the deliverable
+that matters for v1 — the implementation is the proof it works.
 
 ## Status
 
@@ -130,6 +132,15 @@ The spec is human-readable and complete. Start here:
 If you're building a CLI agent and want it driveable by CAP:
 write a [Manifest](docs/cap-v1.md#5-agent-manifest) for it. That's
 the minimum.
+
+**Want to run it?** The reference `cap` CLI works today —
+see [docs/quickstart.md](docs/quickstart.md):
+
+```bash
+cargo build --package cap-cli
+./target/debug/cap list-drivers
+./target/debug/cap chat --driver claude --task "Write hello world in Rust"
+```
 
 ## Contributing
 

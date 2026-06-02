@@ -9,27 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`CodexAppServerDriver`** — new driver for `codex app-server --listen stdio://`
-  JSON-RPC 2.0. This is the protocol the VSCode codex extension uses
-  (marked experimental upstream). Compared to the existing
-  `CodexExecDriver` (one-shot `codex exec --json`):
-  - One process, unbounded turns (no per-turn respawn).
-  - `Driver::send(Prompt)` issues `turn/start`; subsequent prompts
-    reuse the same thread.
-  - `Cancel { CurrentTurn }` maps to `turn/interrupt` — true mid-turn
-    cancellation.
-  - Server-initiated approval requests (`execCommandApproval`,
-    `applyPatchApproval`, `permissionsRequestApproval`) surface as
-    `AgentEvent::PermissionRequest`; `mcpServerElicitationRequest` /
-    `toolRequestUserInput` surface as `AgentEvent::AskUser` with the
-    elicitation schema. `ClientFrame::PermissionResponse` /
-    `ClientFrame::AskUserAnswer` routes back via a pending-id map.
-  - Per-turn `tokenUsage` and rolling `thread/tokenUsage/updated`
-    notifications both surface as CAP usage events.
-  - `.resume(thread_id)` on the builder issues `thread/resume`.
-  - New examples: `codex_chat` (interactive multi-turn) and
-    `codex_smoke` (spawn-only handshake check).
-  - 6 unit tests covering frame dispatch + pending-response routing.
+- **`cap-rs-orchestrator`** — headless multi-agent orchestration engine.
+  Runs N collaborating CLI agents in one process from a declarative
+  `fleet.yaml`: actor model (one tokio task per session owns a
+  `Box<dyn Driver>`), deterministic executor state machine, audit log of
+  every cross-session route, per-session `ask`/`allow`/`deny` + fleet
+  `bypass`, and git-worktree isolation per session. Patterns: pipeline,
+  lead-worker fan-out + join, parallel race, `by_subtask` split.
+- **LLM and hybrid routing** — `cap run --mode static|llm|hybrid`. An LLM
+  can pick the next session at each hand-off (`llm`), or fill gaps left
+  by static routes (`hybrid`).
+- **`AcpDriver`** (`acp:<cmd>`) — Agent Client Protocol over JSON-RPC/stdio.
+  Structured streaming verified against real `opencode acp` v1.14.
+- **`A2aDriver`** (`a2a:<url>`) — drive a remote agent over A2A HTTPS+SSE.
+- **`GrpcDriver`** (`grpc:<addr>`) — OpenClaude gRPC fast-path.
+- **aider driver** (`DriverKind::Aider`) — first-class PTY agent via
+  `ReplParser::aider` / `TuiParser::aider`.
+- **CAP core v1 conformance** — `manifest.rs` (agent Manifest loading +
+  name discovery) and `wire.rs` (spec wire-frame round-trip), closing the
+  remaining v1 spec ↔ code drift.
+- **`cap` CLI** is now functional: `validate`, `list-drivers`, `init`,
+  `manifest validate|resolve`, `chat`, and `run`.
+- **`cap chat`** — interactive multi-agent conversation; auto-creates a
+  single-agent fleet from `--driver` when no `fleet.yaml` is given.
 - `ClientFrame::SessionConfig(SessionConfig)` — wire-frame form of spec
   §7.10 `cap.session.config`. Drivers can now accept session bootstrap
   either via the builder API or as an inbound frame.
@@ -74,6 +76,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `stream-json` driver's `dangerously_skip_permissions` default flipped
   to **`false`** — opt-in only. Examples updated to invoke
   `.dangerously_skip_permissions(true)` explicitly where needed.
+- Codex now defaults to the `stream-json` driver (Claude Code-compatible
+  NDJSON, multi-turn). `pty:codex` remains the screen-scraping fallback
+  and `codex exec --json` remains available as `DriverKind::Codex`.
 - Codex driver returns `cap_queued_input_unsupported` /
   `cap_cancel_unsupported` from `send`, matching spec §14.2 codes.
 - `stream-json` driver returns `cap_cancel_unsupported` for

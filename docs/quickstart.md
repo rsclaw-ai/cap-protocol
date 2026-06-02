@@ -36,10 +36,14 @@ cap run fleet.yaml --task "Write hello world in Rust"
 | `claude` | Claude Code | `claude` |
 | `openclaude` | OpenClaude (stream-json) | `openclaude` |
 | `opencode` | OpenCode (stream-json) | `opencode` |
-| `codex` | OpenAI Codex | `codex` |
+| `codex` | OpenAI Codex (stream-json) | `codex` |
+| `aider` | Aider (PTY) | `aider` |
 | `acp:opencode` | OpenCode (ACP) | `opencode acp` |
+| `a2a:http://127.0.0.1:4000` | Any A2A agent (HTTPS+SSE) | remote endpoint |
 | `grpc:localhost:50051` | OpenClaude (gRPC) | `openclaude grpc` |
 | `pty:codex` | Codex (PTY fallback) | `codex` |
+
+Run `cap list-drivers` to print the current set.
 
 ## 4. Fleet patterns
 
@@ -98,16 +102,39 @@ routes:
     fan_out: { to: [dev1, dev2], split: by_subtask }
 ```
 
+## Interactive chat
+
+Talk to one or more agents directly. With no `fleet.yaml`, `cap chat`
+auto-creates a single-agent fleet using `--driver`:
+
+```bash
+cap chat --driver claude --task "Write hello world in Rust"
+cap chat fleet.yaml --task "..."        # multi-agent chat over a fleet
+```
+
 ## CLI reference
 
 ```
-cap validate <fleet.yaml>   # Parse + validate without running
-cap list-drivers            # Show all supported agent types
-cap init                    # Generate fleet.yaml template
-cap run  <fleet.yaml>       # Run the fleet
-  --task "..."              # Override task
-  --bypass                  # Auto-approve all permissions
+cap validate <fleet.yaml>          # Parse + validate without running
+cap list-drivers                   # Show all supported driver kinds
+cap init                           # Generate fleet.yaml template
+cap manifest validate <path>       # Validate a CAP agent manifest (TOML)
+cap manifest resolve <name|path>   # Resolve a manifest by name or path
+cap chat [fleet.yaml]              # Interactive chat (auto-fleet if omitted)
+  --task "..."                       # Override task
+  --bypass                           # Auto-approve all permissions
+  --driver <kind>                    # Driver for the auto-created fleet (default: claude)
+cap run  <fleet.yaml>              # Run the fleet
+  --task "..."                       # Override task
+  --bypass                           # Auto-approve all permissions
+  --mode static|llm|hybrid           # Routing strategy (default: static)
 ```
+
+### Routing strategies
+
+- **`static`** (default) — follow the `routes:` block verbatim.
+- **`llm`** — an LLM picks the next session at each hand-off.
+- **`hybrid`** — static routes first, LLM fills the gaps.
 
 ## Worktree isolation
 

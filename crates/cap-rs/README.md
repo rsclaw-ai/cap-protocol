@@ -20,11 +20,12 @@ command-line AI agent.
 | You have | You want | Pick this feature |
 |---|---|---|
 | Claude Code (`claude` CLI) | structured events, multi-turn, low overhead | `stream-json` |
-| Any CLI agent — aider, codex, cursor-agent, … | drive it like a human via terminal | `pty` (default) |
-| openclaude (its own gRPC server) | … | `grpc` *(planned)* |
-| Zed-compatible ACP agent (claude-agent-acp, opencode acp, codex native) | … | `acp` *(planned)* |
-| Remote agent across machines | A2A binding | `a2a` *(planned)* |
-| Coordinate several of the above on one project | multi-agent orchestrator | `orchestrator` *(planned)* |
+| Codex / OpenCode / OpenClaude (Claude Code-compatible NDJSON) | structured events over stdio | `stream-json` |
+| Any CLI agent — aider, cursor-agent, … | drive it like a human via terminal | `pty` (default) |
+| openclaude (its own gRPC server) | gRPC fast-path | `grpc` |
+| Zed-compatible ACP agent (opencode acp, claude-agent-acp, …) | ACP-stdio fast-path | `acp` |
+| Remote agent across machines | A2A HTTPS+SSE binding | `a2a` |
+| Coordinate several of the above on one project | multi-agent orchestrator | `orchestrator` |
 
 Everything lives behind feature flags. `pty` is on by default — that's the
 universal fallback that works with any CLI agent without protocol
@@ -179,11 +180,12 @@ cargo run --example pty_hello    --features pty -- aider
 | Flag | Default | Pulls in | What it gives you |
 |---|---|---|---|
 | `pty` | ✅ | `portable-pty`, `vt100` | Universal PTY driver — any CLI agent |
-| `stream-json` | | `tokio`, `tokio-util` | Claude SDK / openclaude fast-path |
-| `acp` | | *(planned)* | ACP-stdio fast-path (Zed-style agents) |
-| `a2a` | | *(planned)* | A2A HTTPS+SSE binding (remote / peer) |
-| `grpc` | | *(planned)* | gRPC fast-path (openclaude-style) |
-| `orchestrator` | | *(planned)* | Multi-agent coordination layer |
+| `stream-json` | | `tokio`, `tokio-util` | Claude Code / codex / opencode / openclaude fast-path (NDJSON) |
+| `codex` | | `tokio` | Codex `exec --json` driver |
+| `acp` | | `tokio` | ACP-stdio fast-path (Zed-style agents) |
+| `a2a` | | `reqwest`, `futures-util` | A2A HTTPS+SSE binding (remote / peer) |
+| `grpc` | | `tonic`, `prost` | gRPC fast-path (openclaude-style) |
+| `orchestrator` | | — | Multi-agent coordination layer |
 | `full` | | all of the above | Everything |
 
 Heavy native deps (tonic, git2, portable-pty's Windows backend) are
@@ -200,13 +202,14 @@ crates.io but **not actively maintained** — depend on `cap-rs` only:
 
 ## Roadmap
 
-- ✅ stream-json driver (Claude Code, multi-turn session mode)
-- ✅ PTY driver (universal, with `RawParser` + `VtPlainParser`)
-- 🟡 Per-agent PTY parsers (aider, codex, cursor)
-- ⚪ ACP-stdio driver (bridges claude-agent-acp / opencode acp / codex)
-- ⚪ A2A binding (remote agents, both directions)
-- ⚪ gRPC binding (openclaude)
-- ⚪ Multi-agent orchestrator (plan propagation, budget, worktrees)
+- ✅ stream-json driver (Claude Code / codex / opencode / openclaude, multi-turn session mode)
+- ✅ PTY driver (universal, with `RawParser`, `VtPlainParser`, `ReplParser`, `TuiParser`)
+- ✅ Per-agent PTY parsers (aider, codex TUI)
+- ✅ ACP-stdio driver (`AcpDriver` — opencode acp and other ACP agents)
+- ✅ A2A binding (`A2aDriver` — remote agents over HTTPS+SSE)
+- ✅ gRPC binding (openclaude)
+- ✅ Multi-agent orchestrator (`cap-rs-orchestrator`: plan propagation, routing, git worktrees)
+- 🟡 Remote transport (Tailscale + push-based permission approval)
 
 ## Authors
 

@@ -1,8 +1,42 @@
-# cap-protocol — status (2026-05-21)
+# cap-protocol — status (2026-06-01)
 
 Lives under `docs/` (not normative — overwrite on each work session).
 
-## Latest: `cap-rs-orchestrator` engine landed (sub-project 1 of the remote-control vision)
+## Latest (2026-06-01): CAP v1 conformance + full driver matrix on `main`
+
+The reference implementation now covers the whole v1 driver matrix and
+passes CAP core v1 conformance. Highlights since the orchestrator landed:
+
+- **CAP core v1 conformance** — `manifest.rs` + `wire.rs` added; spec §7
+  surface (SessionConfig, Usage, ToolCallDelta, risk_level, CancelScope,
+  PermissionMode, AskKind::Schema, …) wired through core types. Latest
+  `fix: resolve CAP v1 spec compliance gaps` closed the remaining drift.
+- **A2A driver** (`A2aDriver`, `a2a:<url>`) — drive a remote agent over
+  A2A HTTPS+SSE. Validated against a real A2A endpoint.
+- **`cap chat`** — interactive multi-agent conversation; with no fleet
+  file it auto-creates a single-agent fleet from `--driver`.
+- **LLM / hybrid routing** — `cap run --mode static|llm|hybrid`; an LLM
+  can pick the next session at each hand-off.
+- **aider driver** (`DriverKind::Aider`) — first-class PTY agent via
+  `ReplParser::aider` / `TuiParser::aider`.
+- **codex defaults to `stream-json`** (Claude Code-compatible NDJSON).
+  `pty:codex` stays as the screen-scraping fallback; `codex exec --json`
+  remains as `DriverKind::Codex`.
+- **`CodexAppServerDriver` removed** — the `codex app-server` websocket
+  transport was never reliable from the operator network (see the
+  obsolete blocker section below, now **RESOLVED** by removal). The
+  stream-json path supersedes it.
+
+Current driver matrix (`cap list-drivers`): `claude`, `openclaude`,
+`codex`, `opencode`, `aider`, `a2a:<url>`, `acp:<cmd>`, `grpc:<addr>`,
+`pty:<cmd>`.
+
+**Next:** remote transport (WS/Tailscale) → push-based remote permission
+approval → mobile approval app.
+
+---
+
+## `cap-rs-orchestrator` engine landed (sub-project 1 of the remote-control vision)
 
 On branch `design/orchestrator-engine`. A headless multi-agent orchestration
 engine: runs N collaborating CLI agents in one process from a declarative
@@ -104,7 +138,7 @@ daf7b7b chore: CI workflow, CHANGELOG, README fixes
 | `ClaudeCodeDriver` (stream-json) | `stream-json` | ✅ | ✅ | works |
 | `PtyDriver` (Raw/VtPlain/Repl parsers) | `pty` | ✅ | ✅ | works |
 | `CodexExecDriver` | `codex` | one-shot/process | ✅ | works |
-| `CodexAppServerDriver` | `codex` | ✅ | ✅ | **blocked on network — see below** |
+| `CodexAppServerDriver` | `codex` | ✅ | ✅ | ~~blocked on network~~ **removed 2026-05 (see top)** |
 
 ## Test gate
 
@@ -138,7 +172,11 @@ Notable wins worth flagging:
   base64 image content. RFC 4648 vectors locked in by test.
 - `Driver::is_alive()` / `exit_status()` + `DriverExitStatus`.
 
-## Known blocker — `codex app-server` backend connection
+## Known blocker — `codex app-server` backend connection  ⟵ OBSOLETE / RESOLVED
+
+> **Resolved (2026-05):** the `CodexAppServerDriver` was removed and codex
+> now defaults to the `stream-json` driver. The websocket-transport
+> analysis below is retained only as historical context.
 
 The new `CodexAppServerDriver` correctly handshakes via stdio:
 `examples/codex_smoke.rs` proves spawn + `initialize` +

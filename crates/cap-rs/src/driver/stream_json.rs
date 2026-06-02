@@ -93,6 +93,7 @@ impl ClaudeCodeDriver {
             dangerously_skip_permissions: false,
             is_opencode: false,
             is_codex: false,
+            continue_last: false,
         }
     }
 
@@ -124,6 +125,7 @@ impl ClaudeCodeDriver {
             dangerously_skip_permissions: false,
             is_opencode: true,
             is_codex: false,
+            continue_last: false,
         }
     }
 
@@ -169,6 +171,7 @@ impl ClaudeCodeDriver {
             dangerously_skip_permissions: false,
             is_opencode: false,
             is_codex: true,
+            continue_last: false,
         }
     }
 
@@ -183,6 +186,7 @@ impl ClaudeCodeDriver {
             dangerously_skip_permissions,
             is_opencode,
             is_codex,
+            continue_last,
         } = b;
 
         let bin = if is_opencode {
@@ -226,28 +230,45 @@ impl ClaudeCodeDriver {
             // use (sub-agent runs inside its own cwd, no escape).
             // Permission-bypass (--dangerously-bypass-approvals-and-sandbox)
             // is opt-in via `.dangerously_skip_permissions(true)`.
-            cmd.arg("exec");
-            if let Some(rid) = &resume {
-                cmd.arg("resume").arg(rid);
-            }
-            cmd.arg("--input-format")
-                .arg("stream-json")
-                .arg("--output-format")
-                .arg("stream-json")
-                .arg("--skip-git-repo-check")
+            // Codex flag layout matters: `resume <thread_id>` is a
+            // sub-subcommand of `exec`, and its OWN parser only
+            // accepts globally-declared flags (--input-format,
+            // --output-format, --skip-git-repo-check). The
+            // exec-level shared flags (--sandbox,
+            // --dangerously-bypass-approvals-and-sandbox, -m) MUST
+            // appear BETWEEN `exec` and `resume`, otherwise resume's
+            // parser rejects them with "unexpected argument".
+            //
+            // Layout:
+            //   codex exec [shared-flags] [resume <id>] [global flags]
+            //              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            //              order matters — emit shared flags first
+            cmd.arg("exec")
                 .arg("--sandbox")
-                .arg("workspace-write")
-                .current_dir(&cwd)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
+                .arg("workspace-write");
             if dangerously_skip_permissions {
                 cmd.arg("--dangerously-bypass-approvals-and-sandbox");
             }
             if let Some(m) = &model {
                 cmd.arg("-m").arg(m);
             }
+            if let Some(rid) = &resume {
+                cmd.arg("resume").arg(rid);
+            } else if continue_last {
+                // `codex exec resume --last` picks the most recent
+                // saved thread for this cwd.
+                cmd.arg("resume").arg("--last");
+            }
+            cmd.arg("--input-format")
+                .arg("stream-json")
+                .arg("--output-format")
+                .arg("stream-json")
+                .arg("--skip-git-repo-check")
+                .current_dir(&cwd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
         } else if is_opencode {
             // OpenCode: `opencode run --output-format stream-json --persist`
             // `--persist` keeps opencode alive across turns — without it,
@@ -279,9 +300,12 @@ impl ClaudeCodeDriver {
             // Resume an existing opencode session by id. opencode's
             // `--session <id>` resumes that specific session's
             // history; without it opencode creates a fresh session
-            // every spawn.
+            // every spawn. `--continue` (no id) picks the most
+            // recent session.
             if let Some(rid) = &resume {
                 cmd.arg("--session").arg(rid);
+            } else if continue_last {
+                cmd.arg("--continue");
             }
         } else {
             // Claude Code: `claude -p --input-format=stream-json --output-format=stream-json`
@@ -309,6 +333,11 @@ impl ClaudeCodeDriver {
             }
             if let Some(rid) = &resume {
                 cmd.arg("--resume").arg(rid);
+            } else if continue_last {
+                // claudecode's `--continue` resumes the most recent
+                // session for this cwd, equivalent to `claude /sessions`
+                // → pick first.
+                cmd.arg("--continue");
             }
         }
 
@@ -430,6 +459,12 @@ pub struct ClaudeCodeDriverBuilder {
     /// stream-json --output-format stream-json`). Mutually exclusive
     /// with `is_opencode`; both false = claudecode/openclaude.
     is_codex: bool,
+    /// When true, pass the agent CLI's "resume last session" flag
+    /// (claudecode `--continue`, opencode `--continue`, codex
+    /// `exec resume --last`). Mutually exclusive with `resume` —
+    /// `.resume(uuid)` clears this; `.continue_last(true)` clears
+    /// `resume`.
+    continue_last: bool,
 }
 
 impl ClaudeCodeDriverBuilder {
@@ -457,6 +492,19 @@ impl ClaudeCodeDriverBuilder {
     /// the `session_id` you got from a prior session's `Ready` event.
     pub fn resume(mut self, uuid: impl Into<String>) -> Self {
         self.resume = Some(uuid.into());
+        self.continue_last = false;
+        self
+    }
+
+    /// Resume the MOST RECENT persisted session for this agent in the
+    /// current cwd. Equivalent to `claude --continue` / `opencode run
+    /// --continue` / `codex exec resume --last`. Mutually exclusive
+    /// with `.resume(uuid)`; setting one clears the other.
+    pub fn continue_last(mut self, on: bool) -> Self {
+        self.continue_last = on;
+        if on {
+            self.resume = None;
+        }
         self
     }
 
