@@ -92,6 +92,7 @@ impl ClaudeCodeDriver {
             // accept the trade-off invoke `.dangerously_skip_permissions(true)`.
             dangerously_skip_permissions: false,
             is_opencode: false,
+            is_codex: false,
         }
     }
 
@@ -122,6 +123,52 @@ impl ClaudeCodeDriver {
             replay_user_messages: false,
             dangerously_skip_permissions: false,
             is_opencode: true,
+            is_codex: false,
+        }
+    }
+
+    /// Builder pre-configured for Codex via stream-json.
+    ///
+    /// Spawns `codex exec --input-format stream-json --output-format
+    /// stream-json` and reads Claude Code-compatible NDJSON frames from
+    /// stdout. Codex's exec subcommand has a native multi-turn loop
+    /// behind these two flags — it stays alive until stdin EOF, reading
+    /// successive `{"type":"user", ...}` frames and emitting
+    /// `system/init`, `assistant`, `result` frames identical in shape
+    /// to claudecode's protocol.
+    ///
+    /// Replaces the older `codex_mcp` driver path for the cap_live use
+    /// case: stream-json gives us first-class `Thought`/`TextChunk`
+    /// streaming via the existing claudecode parser, and there's no
+    /// MCP `tools/call` JSON-RPC envelope to traverse — turns are
+    /// noticeably faster.
+    ///
+    /// ```no_run
+    /// # async fn run() -> anyhow::Result<()> {
+    /// use cap_rs::driver::stream_json::ClaudeCodeDriver;
+    ///
+    /// let driver = ClaudeCodeDriver::codex_builder(".")
+    ///     .spawn()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn codex_builder(cwd: impl AsRef<Path>) -> ClaudeCodeDriverBuilder {
+        ClaudeCodeDriverBuilder {
+            bin: Some("codex".to_string()),
+            cwd: cwd.as_ref().to_path_buf(),
+            model: None,
+            session_id: None,
+            resume: None,
+            replay_user_messages: false,
+            // Driver caller decides whether to bypass codex sandbox
+            // prompts via `.dangerously_skip_permissions(true)` —
+            // maps to `--dangerously-bypass-approvals-and-sandbox`
+            // for codex (mirrors the spec §13.1 same-semantics flag
+            // used for claudecode).
+            dangerously_skip_permissions: false,
+            is_opencode: false,
+            is_codex: true,
         }
     }
 
@@ -135,6 +182,7 @@ impl ClaudeCodeDriver {
             replay_user_messages,
             dangerously_skip_permissions,
             is_opencode,
+            is_codex,
         } = b;
 
         let bin = if is_opencode {
@@ -142,6 +190,11 @@ impl ClaudeCodeDriver {
                 .ok()
                 .or(bin)
                 .unwrap_or_else(|| "opencode".to_string())
+        } else if is_codex {
+            std::env::var("CODEX_BIN")
+                .ok()
+                .or(bin)
+                .unwrap_or_else(|| "codex".to_string())
         } else {
             std::env::var("CLAUDE_BIN")
                 .ok()
@@ -151,7 +204,44 @@ impl ClaudeCodeDriver {
 
         let mut cmd = Command::new(&bin);
 
-        if is_opencode {
+        if is_codex {
+            // Codex: `codex exec --input-format stream-json
+            //         --output-format stream-json --skip-git-repo-check
+            //         --sandbox workspace-write`.
+            //
+            // Native multi-turn: codex's `exec` subcommand reads
+            // successive `{"type":"user", ...}` frames from stdin and
+            // stays alive until stdin EOF — no `--persist` flag
+            // analogous to opencode is required. Output frames are
+            // Claude-compatible (system/init, assistant text/thinking
+            // chunks, result), so the existing claudecode parser
+            // handles them unchanged.
+            //
+            // sandbox=workspace-write matches the prior codex_mcp
+            // builder's default and is the right policy for cap_live
+            // use (sub-agent runs inside its own cwd, no escape).
+            // Permission-bypass (--dangerously-bypass-approvals-and-sandbox)
+            // is opt-in via `.dangerously_skip_permissions(true)`.
+            cmd.arg("exec")
+                .arg("--input-format")
+                .arg("stream-json")
+                .arg("--output-format")
+                .arg("stream-json")
+                .arg("--skip-git-repo-check")
+                .arg("--sandbox")
+                .arg("workspace-write")
+                .current_dir(&cwd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            if dangerously_skip_permissions {
+                cmd.arg("--dangerously-bypass-approvals-and-sandbox");
+            }
+            if let Some(m) = &model {
+                cmd.arg("-m").arg(m);
+            }
+        } else if is_opencode {
             // OpenCode: `opencode run --output-format stream-json --persist`
             // `--persist` keeps opencode alive across turns — without it,
             // opencode reads ONE prompt then exits, which makes
@@ -222,11 +312,19 @@ impl ClaudeCodeDriver {
         ] {
             cmd.env_remove(var);
         }
+        if is_codex {
+            // Codex looks at these to detect "we're already inside a
+            // codex session" and bails the same way claude does.
+            for var in ["CODEX_HEADLESS", "CODEX_INTERACTIVE"] {
+                cmd.env_remove(var);
+            }
+        }
 
         debug!(
             bin = %bin,
             cwd = %cwd.display(),
             is_opencode,
+            is_codex,
             session_mode = replay_user_messages,
             resume = ?resume,
             session_id = ?session_id,
@@ -314,6 +412,10 @@ pub struct ClaudeCodeDriverBuilder {
     dangerously_skip_permissions: bool,
     /// When true, use OpenCode CLI shape instead of Claude Code.
     is_opencode: bool,
+    /// When true, use Codex CLI shape (`codex exec --input-format
+    /// stream-json --output-format stream-json`). Mutually exclusive
+    /// with `is_opencode`; both false = claudecode/openclaude.
+    is_codex: bool,
 }
 
 impl ClaudeCodeDriverBuilder {
