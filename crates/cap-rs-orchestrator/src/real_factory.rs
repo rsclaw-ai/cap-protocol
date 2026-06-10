@@ -4,6 +4,7 @@
 //! - `openclaude` → `stream-json` (Anthropic SDK-compatible)
 //! - `opencode` → `stream-json` (Claude Code-compatible NDJSON)
 //! - `codex` → `stream-json` (Claude Code-compatible NDJSON)
+//! - `qoder` → `stream-json` (Claude Code-compatible NDJSON)
 //! - `acp:<cmd>` → ACP over stdio
 //!
 //! `pty:<cmd>` remains the universal screen-scraping fallback; `pty:codex`
@@ -76,6 +77,17 @@ impl DriverFactory for RealDriverFactory {
             DriverKind::Codex => {
                 let driver = ClaudeCodeDriver::builder(cwd)
                     .bin("codex")
+                    .dangerously_skip_permissions(bypass)
+                    .spawn()
+                    .await?;
+                Ok(Box::new(driver))
+            }
+            // qoder: Qoder CLI via the same Claude Code-compatible stream-json
+            // wire format. Invoked as `qodercli -p --input-format=stream-json
+            // --output-format=stream-json`.
+            DriverKind::Qoder => {
+                let driver = ClaudeCodeDriver::builder(cwd)
+                    .bin("qodercli")
                     .dangerously_skip_permissions(bypass)
                     .spawn()
                     .await?;

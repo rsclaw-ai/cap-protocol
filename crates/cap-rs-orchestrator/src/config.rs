@@ -172,7 +172,7 @@ pub enum PermissionPolicy {
     Bypass,
 }
 
-/// `claude` | `openclaude` | `codex` | `opencode` | `aider` | `grpc:<addr>` | `acp:<command>` | `pty:<command>`.
+/// `claude` | `openclaude` | `codex` | `opencode` | `qoder` | `aider` | `grpc:<addr>` | `acp:<command>` | `pty:<command>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriverKind {
     Claude,
@@ -181,6 +181,8 @@ pub enum DriverKind {
     /// OpenCode via stream-json (Claude Code-compatible NDJSON frames).
     /// Higher fidelity than ACP: token-level deltas, no handshake overhead.
     OpenCode,
+    /// Qoder CLI via stream-json (Claude Code-compatible NDJSON frames).
+    Qoder,
     /// Aider chat via PTY (<https://github.com/paul-gauthier/aider>).
     Aider,
     /// Structured Agent Client Protocol agent (e.g. `acp:opencode`).
@@ -206,6 +208,7 @@ fn parse_driver_kind(s: &str) -> Result<DriverKind, String> {
         "openclaude" => Ok(DriverKind::OpenClaude),
         "codex" => Ok(DriverKind::Codex),
         "opencode" => Ok(DriverKind::OpenCode),
+        "qoder" => Ok(DriverKind::Qoder),
         "aider" => Ok(DriverKind::Aider),
         other => {
             if let Some(addr) = other.strip_prefix("grpc:") {
@@ -238,7 +241,7 @@ fn parse_driver_kind(s: &str) -> Result<DriverKind, String> {
                 Ok(DriverKind::Pty(cmd.to_string()))
             } else {
                 Err(format!(
-                    "unknown driver kind '{other}' (expected claude | openclaude | codex | opencode | aider | grpc:<host:port> | a2a:<http-url> | acp:<cmd> | pty:<cmd>)"
+                    "unknown driver kind '{other}' (expected claude | openclaude | codex | opencode | qoder | aider | grpc:<host:port> | a2a:<http-url> | acp:<cmd> | pty:<cmd>)"
                 ))
             }
         }
@@ -259,6 +262,7 @@ pub fn list_driver_kinds() -> Vec<&'static str> {
         "openclaude   OpenClaude CLI (stream-json, Anthropic SDK-compatible)",
         "codex        OpenAI Codex CLI (stream-json, Claude Code-compatible)",
         "opencode     OpenCode CLI (stream-json, Claude Code-compatible)",
+        "qoder        Qoder CLI (stream-json, Claude Code-compatible)",
         "aider        Aider chat via PTY (https://github.com/paul-gauthier/aider)",
         "a2a:<url>    A2A HTTPS+SSE endpoint (e.g. a2a:http://127.0.0.1:4000)",
         "acp:<cmd>    Any ACP-compatible agent (e.g. acp:opencode)",
