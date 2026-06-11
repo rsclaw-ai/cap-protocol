@@ -12,8 +12,8 @@ categories.workspace   = true
 readme = "README.md"
 
 [dependencies]
-cap-rs = { path = "../cap-rs" }
-cap-rs-orchestrator = { path = "../cap-rs-orchestrator" }
+cap-rs = { version = "0.1", path = "../cap-rs" }
+cap-rs-orchestrator = { version = "0.1", path = "../cap-rs-orchestrator" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "signal"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
