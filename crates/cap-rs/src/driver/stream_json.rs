@@ -312,12 +312,21 @@ impl ClaudeCodeDriver {
             cmd.arg("-p")
                 .arg("--input-format=stream-json")
                 .arg("--output-format=stream-json")
-                .arg("--verbose")
                 .current_dir(&cwd)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
+
+            // --verbose is claude/openclaude-specific; other compatible
+            // CLIs (e.g. qodercli) reject it as an unknown flag.
+            let bin_stem = std::path::Path::new(&bin)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&bin);
+            if matches!(bin_stem, "claude" | "openclaude") {
+                cmd.arg("--verbose");
+            }
 
             if dangerously_skip_permissions {
                 cmd.arg("--dangerously-skip-permissions");
