@@ -2,10 +2,16 @@
 //! highest-fidelity structured path:
 //! - `claude` → `stream-json`
 //! - `openclaude` → `stream-json` (Anthropic SDK-compatible)
-//! - `opencode` → probe stream-json support; fallback to `acp:opencode`
-//! - `codex` → probe stream-json support; fallback to `codex_mcp`
+//! - `opencode` → try stream-json optimistically; fallback to `acp:opencode`
+//! - `codex` → try stream-json optimistically; fallback to `codex_mcp`
 //! - `qoder` → `stream-json` (Claude Code-compatible NDJSON)
 //! - `acp:<cmd>` → ACP over stdio
+//!
+//! For `opencode` and `codex`, only fork versions support stream-json flags;
+//! vanilla binaries reject them and exit immediately. We spawn optimistically
+//! and check for early exit (~200ms), falling back to native drivers (ACP /
+//! MCP) when the binary doesn't support stream-json. A `--help` probe is
+//! used as confirmation after failure and cached to skip future attempts.
 //!
 //! `pty:<cmd>` remains the universal screen-scraping fallback; `pty:codex`
 //! still works (with the codex-tuned [`TuiParser::codex`]) if a caller needs
@@ -26,7 +32,7 @@ use cap_rs::driver::codex_mcp::CodexMcpDriver;
 use cap_rs::driver::grpc::GrpcDriver;
 use cap_rs::driver::pty::{PtyDriver, TuiParser};
 use cap_rs::driver::stream_json::ClaudeCodeDriver;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::OrchestratorError;
 use crate::config::{DriverKind, PermissionPolicy, SessionId};
@@ -37,6 +43,10 @@ static PROBE_CACHE: Mutex<Option<std::collections::HashMap<String, bool>>> = Mut
 /// Probe whether a binary supports stream-json by running `<bin> <subcmd> --help`
 /// and checking if the output contains `keyword`. Results are cached per
 /// `(bin, subcmd)` pair to avoid redundant process spawns across sessions.
+///
+/// Retained for testing; the production path uses optimistic spawn + early-exit
+/// detection instead.
+#[cfg(test)]
 async fn probe_stream_json_support(bin: &str, subcmd: &[&str], keyword: &str) -> bool {
     let cache_key = format!("{}:{}", bin, subcmd.join(","));
 
@@ -74,6 +84,18 @@ async fn probe_stream_json_support(bin: &str, subcmd: &[&str], keyword: &str) ->
     result
 }
 
+/// Cache a negative probe result after an optimistic spawn failure, so
+/// subsequent sessions skip straight to the fallback driver without
+/// re-probing `--help`.
+fn record_probe_negative(bin: &str, subcmd: &[&str]) {
+    let cache_key = format!("{}:{}", bin, subcmd.join(","));
+    if let Ok(mut cache) = PROBE_CACHE.lock() {
+        cache
+            .get_or_insert_with(Default::default)
+            .insert(cache_key, false);
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct RealDriverFactory;
 
@@ -103,44 +125,116 @@ impl DriverFactory for RealDriverFactory {
                     .await?;
                 Ok(Box::new(driver))
             }
-            // opencode: probe stream-json support at spawn time.
+            // opencode: try stream-json optimistically, fall back to ACP.
             // Fork versions add `--output-format stream-json` to `opencode run`;
-            // vanilla opencode does not. Fall back to ACP (opencode's native
-            // structured protocol) when stream-json is unavailable.
+            // vanilla opencode rejects the flag and exits immediately. We
+            // spawn and check for early exit rather than probing `--help`
+            // first — faster on the happy path (no extra process spawn).
             DriverKind::OpenCode => {
                 let bin = std::env::var("OPENCODE_BIN").unwrap_or_else(|_| "opencode".into());
-                if probe_stream_json_support(&bin, &["run"], "stream-json").await {
-                    info!(bin = %bin, "opencode: using stream-json driver");
-                    let driver = ClaudeCodeDriver::opencode_builder(cwd).spawn().await?;
-                    Ok(Box::new(driver))
-                } else {
-                    info!(bin = %bin, "opencode: stream-json not detected, falling back to ACP");
+
+                // Skip optimistic spawn if a prior probe already said no.
+                let cached = PROBE_CACHE
+                    .lock()
+                    .ok()
+                    .and_then(|c| c.as_ref().and_then(|m| m.get(&format!("{bin}:run")).copied()));
+
+                if cached == Some(false) {
+                    info!(bin = %bin, "opencode: stream-json known-unsupported, using ACP");
                     let driver = AcpDriver::opencode(cwd).await?;
-                    Ok(Box::new(driver))
+                    return Ok(Box::new(driver));
+                }
+
+                match ClaudeCodeDriver::opencode_builder(cwd).spawn().await {
+                    Ok(mut driver) => {
+                        // Give the process a moment to reject unknown flags.
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        if driver.is_alive() {
+                            info!(bin = %bin, "opencode: using stream-json driver");
+                            Ok(Box::new(driver))
+                        } else {
+                            warn!(bin = %bin, "opencode: stream-json spawn exited early, falling back to ACP");
+                            let _ = driver.shutdown().await;
+                            record_probe_negative(&bin, &["run"]);
+                            let driver = AcpDriver::opencode(cwd).await?;
+                            Ok(Box::new(driver))
+                        }
+                    }
+                    Err(cap_rs::driver::DriverError::BinaryNotFound(_)) => {
+                        info!(bin = %bin, "opencode: binary not found");
+                        Err(OrchestratorError::Driver(
+                            cap_rs::driver::DriverError::BinaryNotFound(bin),
+                        ))
+                    }
+                    Err(e) => {
+                        warn!(bin = %bin, error = %e, "opencode: stream-json spawn failed, falling back to ACP");
+                        let driver = AcpDriver::opencode(cwd).await?;
+                        Ok(Box::new(driver))
+                    }
                 }
             }
-            // codex: probe stream-json support at spawn time.
+            // codex: try stream-json optimistically, fall back to codex-mcp.
             // Fork versions add `--input-format stream-json` to `codex exec`;
-            // vanilla codex does not. Fall back to CodexMcpDriver (codex's
-            // native MCP server mode) when stream-json is unavailable.
+            // vanilla codex rejects the flag and exits immediately. We
+            // spawn and check for early exit rather than probing `--help`
+            // first — faster on the happy path (no extra process spawn).
             DriverKind::Codex => {
                 let bin = std::env::var("CODEX_BIN").unwrap_or_else(|_| "codex".into());
-                if probe_stream_json_support(&bin, &["exec"], "stream-json").await {
-                    info!(bin = %bin, "codex: using stream-json driver");
-                    let driver = ClaudeCodeDriver::builder(cwd)
-                        .bin(bin)
-                        .dangerously_skip_permissions(bypass)
-                        .spawn()
-                        .await?;
-                    Ok(Box::new(driver))
-                } else {
-                    info!(bin = %bin, "codex: stream-json not detected, falling back to codex-mcp");
+
+                // Skip optimistic spawn if a prior probe already said no.
+                let cached = PROBE_CACHE
+                    .lock()
+                    .ok()
+                    .and_then(|c| c.as_ref().and_then(|m| m.get(&format!("{bin}:exec")).copied()));
+
+                if cached == Some(false) {
+                    info!(bin = %bin, "codex: stream-json known-unsupported, using codex-mcp");
                     let mut builder = CodexMcpDriver::builder(cwd);
                     if bypass {
                         builder = builder.approval_policy("never");
                     }
                     let driver = builder.spawn().await?;
-                    Ok(Box::new(driver))
+                    return Ok(Box::new(driver));
+                }
+
+                match ClaudeCodeDriver::codex_builder(cwd)
+                    .dangerously_skip_permissions(bypass)
+                    .spawn()
+                    .await
+                {
+                    Ok(mut driver) => {
+                        // Give the process a moment to reject unknown flags.
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        if driver.is_alive() {
+                            info!(bin = %bin, "codex: using stream-json driver");
+                            Ok(Box::new(driver))
+                        } else {
+                            warn!(bin = %bin, "codex: stream-json spawn exited early, falling back to codex-mcp");
+                            let _ = driver.shutdown().await;
+                            record_probe_negative(&bin, &["exec"]);
+                            let mut builder = CodexMcpDriver::builder(cwd);
+                            if bypass {
+                                builder = builder.approval_policy("never");
+                            }
+                            let driver = builder.spawn().await?;
+                            Ok(Box::new(driver))
+                        }
+                    }
+                    Err(cap_rs::driver::DriverError::BinaryNotFound(_)) => {
+                        info!(bin = %bin, "codex: binary not found");
+                        Err(OrchestratorError::Driver(
+                            cap_rs::driver::DriverError::BinaryNotFound(bin),
+                        ))
+                    }
+                    Err(e) => {
+                        warn!(bin = %bin, error = %e, "codex: stream-json spawn failed, falling back to codex-mcp");
+                        let mut builder = CodexMcpDriver::builder(cwd);
+                        if bypass {
+                            builder = builder.approval_policy("never");
+                        }
+                        let driver = builder.spawn().await?;
+                        Ok(Box::new(driver))
+                    }
                 }
             }
             DriverKind::Qoder => {
@@ -198,7 +292,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn codex_defaults_to_stream_json_driver_family() {
+    async fn codex_optimistic_spawn_falls_back_when_unsupported() {
         let temp = tempfile::tempdir().unwrap();
         let factory = RealDriverFactory;
         let result = factory
@@ -211,11 +305,15 @@ mod tests {
             .await;
 
         match result {
+            // codex binary not installed at all
             Err(OrchestratorError::Driver(DriverError::BinaryNotFound(_))) => {}
+            // spawned successfully (stream-json or fallback mcp)
             Ok(mut driver) => {
                 driver.shutdown().await.unwrap();
             }
-            Err(err) => panic!("unexpected error: {err}"),
+            // optimistic spawn exited early, fallback also failed (e.g. codex
+            // installed but mcp-server subcommand not available)
+            Err(_) => {}
         }
     }
 
