@@ -214,19 +214,18 @@ impl<F: DriverFactory, W: WorktreeManager> Run<F, W> {
         let kind = match self.spec.fleet.sessions.get(id) {
             Some(s) => match s.driver_kind() {
                 Some(k) => k,
-                None => DriverKind::Pty(
-                    s.agent
-                        .clone()
-                        .or_else(|| {
-                            s.manifest.as_ref().and_then(|p| {
-                                std::path::Path::new(p)
-                                    .file_stem()
-                                    .and_then(|s| s.to_str())
-                                    .map(str::to_string)
-                            })
+                None => {
+                    let _ = self
+                        .out
+                        .send(OrchestratorEvent::SessionFailed {
+                            session: id.clone(),
+                            error: format!(
+                                "session '{id}' has no driver, agent, or manifest configured"
+                            ),
                         })
-                        .unwrap_or_else(|| id.clone()),
-                ),
+                        .await;
+                    return false;
+                }
             },
             None => return false,
         };

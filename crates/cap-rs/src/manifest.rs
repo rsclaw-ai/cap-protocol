@@ -342,11 +342,30 @@ impl AgentManifest {
     }
 
     pub fn discover_by_name(name: &str) -> Result<Self, ManifestError> {
+        if name.is_empty() || name.contains('\0') {
+            return Err(ManifestError::Invalid(
+                "manifest name must not be empty or contain NUL".into(),
+            ));
+        }
+        if name.contains('/') || name.contains('\\') || name.contains("..") {
+            return Err(ManifestError::Invalid(
+                "manifest name must not contain path separators".into(),
+            ));
+        }
         let candidates = manifest_candidates(name);
         for path in candidates {
             if path.exists() {
                 return Self::from_path(path);
             }
+        }
+        // Only attempt --cap-manifest discovery for safe binary names
+        // (alphanumeric, '_', '-', '.'), matching the orchestrator's
+        // valid_binary_name contract.
+        let is_safe_name = name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+        if !is_safe_name {
+            return Err(ManifestError::NotFound(name.to_string()));
         }
         match Command::new(name).arg("--cap-manifest").output() {
             Ok(output) if output.status.success() => {

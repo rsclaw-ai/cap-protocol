@@ -106,16 +106,6 @@ path = "examples/codex_hello.rs"
 required-features = ["codex"]
 
 [[example]]
-name = "codex_chat"
-path = "examples/codex_chat.rs"
-required-features = ["codex"]
-
-[[example]]
-name = "codex_smoke"
-path = "examples/codex_smoke.rs"
-required-features = ["codex"]
-
-[[example]]
 name = "grpc_hello"
 path = "examples/grpc_hello.rs"
 required-features = ["grpc"]

@@ -24,8 +24,6 @@ pub mod grpc;
 
 #[cfg(feature = "a2a")]
 pub mod a2a;
-// Future modules — gated on their respective features:
-// #[cfg(feature = "orchestrator")] pub mod orchestrator;
 
 // The Driver trait and DriverError are shared across all driver backends.
 // They're gated on `any(stream-json, pty, ...)` because their deps
@@ -133,7 +131,6 @@ mod common {
             .join(separator)
     }
 
-    #[cfg(feature = "stream-json")]
     impl From<serde_json::Error> for DriverError {
         fn from(e: serde_json::Error) -> Self {
             DriverError::Parse(e.to_string())

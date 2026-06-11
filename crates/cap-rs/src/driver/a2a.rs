@@ -231,7 +231,11 @@ pub struct A2aDriver {
 impl A2aDriver {
     pub async fn connect(endpoint: impl Into<String>) -> Result<Self, DriverError> {
         let endpoint = endpoint.into().trim_end_matches('/').to_string();
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(reqwest_to_driver_error)?;
         let card: AgentCard = client
             .get(format!("{endpoint}/.well-known/agent-card.json"))
             .send()

@@ -463,20 +463,80 @@ fn valid_grpc_address(addr: &str) -> bool {
         return false;
     }
     // Host: alphanumeric, dots, hyphens, underscores, or IPv6 brackets.
-    host.chars()
+    if !host
+        .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '[' | ']' | ':'))
+    {
+        return false;
+    }
+    // SSRF: reject private/reserved IP addresses.
+    if is_private_host(host) {
+        return false;
+    }
+    true
+}
+
+/// Returns true if `host` resolves to a private, loopback, link-local, or
+/// metadata-service address that should be blocked for SSRF prevention.
+fn is_private_host(host: &str) -> bool {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if bare == "localhost" || bare.is_empty() {
+        return true;
+    }
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => {
+                let octets = v4.octets();
+                // 127.0.0.0/8 (loopback)
+                octets[0] == 127
+                // 10.0.0.0/8
+                || octets[0] == 10
+                // 172.16.0.0/12
+                || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+                // 192.168.0.0/16
+                || (octets[0] == 192 && octets[1] == 168)
+                // 169.254.0.0/16 (link-local + metadata service)
+                || (octets[0] == 169 && octets[1] == 254)
+                // 0.0.0.0
+                || octets == [0, 0, 0, 0]
+            }
+            std::net::IpAddr::V6(v6) => {
+                let segs = v6.segments();
+                // ::1 (loopback)
+                segs == [0, 0, 0, 0, 0, 0, 0, 1]
+                // :: (unspecified)
+                || segs == [0, 0, 0, 0, 0, 0, 0, 0]
+                // fc00::/7 (unique local)
+                || (segs[0] & 0xfe00) == 0xfc00
+                // fe80::/10 (link-local)
+                || (segs[0] & 0xffc0) == 0xfe80
+            }
+        };
+    }
+    false
 }
 
 fn valid_a2a_url(url: &str) -> bool {
     let Ok(parsed) = Url::parse(url) else {
         return false;
     };
-    matches!(parsed.scheme(), "http" | "https")
-        && parsed
-            .host_str()
-            .is_some_and(|host| !host.is_empty() && !host.starts_with('-') && !host.contains(".."))
-        && parsed.password().is_none()
-        && parsed.username().is_empty()
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    if host.is_empty() || host.starts_with('-') || host.contains("..") {
+        return false;
+    }
+    if parsed.password().is_some() || !parsed.username().is_empty() {
+        return false;
+    }
+    // SSRF: reject private/reserved IP addresses.
+    if is_private_host(host) {
+        return false;
+    }
+    true
 }
 
 /// Safe git ref: non-empty, no `..`, no leading `-`, chars limited to
@@ -521,6 +581,13 @@ impl FleetSpec {
     /// Static validation: every referenced session exists, every trigger uses
     /// the `.done` form, and every route has exactly one action.
     pub fn validate(&self) -> Result<(), OrchestratorError> {
+        const MAX_SESSIONS: usize = 256;
+        if self.fleet.sessions.len() > MAX_SESSIONS {
+            return Err(OrchestratorError::Config(format!(
+                "fleet has {} sessions, maximum is {MAX_SESSIONS}",
+                self.fleet.sessions.len()
+            )));
+        }
         if !valid_git_ref(&self.fleet.base_branch) {
             return Err(OrchestratorError::Config(format!(
                 "invalid base_branch '{}'",
@@ -1016,13 +1083,13 @@ fleet:
 fleet:
   base_branch: main
   sessions:
-    agent: { driver: "grpc:localhost:50051" }
+    agent: { driver: "grpc:agent.example.com:50051" }
   start: agent
 "#;
         let spec = FleetSpec::from_yaml(yaml).unwrap();
         assert_eq!(
             spec.fleet.sessions["agent"].driver,
-            Some(DriverKind::Grpc("localhost:50051".into()))
+            Some(DriverKind::Grpc("agent.example.com:50051".into()))
         );
         spec.validate().unwrap();
     }
@@ -1050,13 +1117,13 @@ fleet:
 fleet:
   base_branch: main
   sessions:
-    agent: { driver: "a2a:http://127.0.0.1:4000/agent" }
+    agent: { driver: "a2a:https://agent.example.com:4000/agent" }
   start: agent
 "#;
         let spec = FleetSpec::from_yaml(yaml).unwrap();
         assert_eq!(
             spec.fleet.sessions["agent"].driver,
-            Some(DriverKind::A2a("http://127.0.0.1:4000/agent".into()))
+            Some(DriverKind::A2a("https://agent.example.com:4000/agent".into()))
         );
         spec.validate().unwrap();
     }
@@ -1124,13 +1191,13 @@ output_modalities = ["text"]
 fleet:
   base_branch: main
   sessions:
-    agent: { driver: "grpc:127.0.0.1:8080" }
+    agent: { driver: "grpc:203.0.113.1:8080" }
   start: agent
 "#;
         let spec = FleetSpec::from_yaml(yaml).unwrap();
         assert_eq!(
             spec.fleet.sessions["agent"].driver,
-            Some(DriverKind::Grpc("127.0.0.1:8080".into()))
+            Some(DriverKind::Grpc("203.0.113.1:8080".into()))
         );
     }
 }

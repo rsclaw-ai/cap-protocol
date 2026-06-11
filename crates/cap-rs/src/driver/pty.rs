@@ -1196,6 +1196,11 @@ impl PtyDriverBuilder {
             if env_remove.iter().any(|r| *r == *k_str) {
                 continue;
             }
+            // Strip sensitive env vars by default to prevent credential
+            // leakage to spawned agents.
+            if is_sensitive_env_var(&k_str) {
+                continue;
+            }
             builder.env(k, v);
         }
         for a in args {
@@ -1507,6 +1512,39 @@ fn spawn_child_waiter(
         })
         .map_err(|e| DriverError::Io(std::io::Error::other(e.to_string())))?;
     Ok(())
+}
+
+/// Returns true if the env var name matches a known sensitive pattern and
+/// should be stripped before spawning a child agent process.
+fn is_sensitive_env_var(name: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "NPM_TOKEN",
+        "PYPI_TOKEN",
+        "DOCKER_PASSWORD",
+        "CODESPACES_TOKEN",
+    ];
+    const SUFFIXES: &[&str] = &[
+        "_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_CREDENTIALS",
+    ];
+    const PREFIXES: &[&str] = &[
+        "AWS_", "GCP_", "AZURE_", "GOOGLE_",
+    ];
+
+    if EXACT.contains(&name) {
+        return true;
+    }
+    if SUFFIXES.iter().any(|s| name.ends_with(s)) {
+        return true;
+    }
+    if PREFIXES.iter().any(|p| name.starts_with(p)) {
+        return true;
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------

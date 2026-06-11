@@ -189,6 +189,17 @@ impl CliLlmClient {
             !command.is_empty(),
             "CliLlmClient command must have at least the binary"
         );
+        let bin = &command[0];
+        assert!(
+            !bin.is_empty()
+                && !bin.contains('/')
+                && !bin.contains('\\')
+                && !bin.contains(' ')
+                && bin
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')),
+            "CliLlmClient command[0] must be a bare binary name, got '{bin}'"
+        );
         Self {
             command,
             timeout: Duration::from_secs(120),
@@ -363,6 +374,7 @@ impl RoutingStrategy for LlmRouting {
             &valid_sessions,
             self.config.max_decisions,
             ctx.task,
+            ctx.spec.fleet.permissions,
         )
     }
 }
@@ -527,6 +539,7 @@ fn parse_llm_response(
     valid_sessions: &HashSet<SessionId>,
     max_decisions: usize,
     task: &str,
+    default_permissions: PermissionPolicy,
 ) -> Vec<RouteDecision> {
     let json_str = match extract_json(text) {
         Some(s) => s,
@@ -573,6 +586,13 @@ fn parse_llm_response(
                 // Check for driver field → dynamic session
                 let driver_str = action.get("driver").and_then(|d| d.as_str());
                 if let Some(ds) = driver_str {
+                    // Validate target session id
+                    if !crate::config::valid_session_id(target) {
+                        decisions.push(RouteDecision::Error(format!(
+                            "LLM used invalid session id '{target}'"
+                        )));
+                        continue;
+                    }
                     // Dynamic session: driver specified
                     let driver_kind = match DriverKind::parse(ds) {
                         Some(d) => d,
@@ -583,12 +603,20 @@ fn parse_llm_response(
                             continue;
                         }
                     };
+                    // Restrict LLM-spawned drivers to remote/structured backends;
+                    // pty: and acp: would spawn arbitrary local processes.
+                    if matches!(driver_kind, DriverKind::Pty(_) | DriverKind::Acp(_)) {
+                        decisions.push(RouteDecision::Error(format!(
+                            "LLM cannot spawn local-process drivers (pty/acp), got '{ds}'"
+                        )));
+                        continue;
+                    }
+                    // Use fleet-default permissions for dynamic sessions rather
+                    // than hardcoded Allow.
                     let permissions = if valid_sessions.contains(target) {
-                        // Target exists in spec; we still route with original session's policy.
-                        // For dynamic we default to Allow.
                         PermissionPolicy::Allow
                     } else {
-                        PermissionPolicy::Allow
+                        default_permissions
                     };
                     decisions.push(RouteDecision::DynamicRoute {
                         target: target.to_string(),
@@ -755,7 +783,7 @@ mod tests {
     #[test]
     fn parse_llm_route_to_known_session() {
         let json = r#"{"actions": [{"type": "route", "target": "reviewer", "context": "review this"}], "reasoning": "ok"}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
+        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert_eq!(decisions.len(), 1);
         match &decisions[0] {
             RouteDecision::Route { target, payload } => {
@@ -769,14 +797,14 @@ mod tests {
     #[test]
     fn parse_llm_complete_returns_none() {
         let json = r#"{"actions": [], "reasoning": "done"}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
+        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert_eq!(decisions, vec![RouteDecision::None]);
     }
 
     #[test]
     fn parse_llm_invalid_target_returns_error() {
         let json = r#"{"actions": [{"type": "route", "target": "ghost", "context": "hi"}]}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
+        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert!(
             decisions
                 .iter()
@@ -786,7 +814,7 @@ mod tests {
 
     #[test]
     fn parse_llm_garbage_text_returns_error() {
-        let decisions = parse_llm_response("not json at all", &valid_sessions(), 5, "task");
+        let decisions = parse_llm_response("not json at all", &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert!(
             decisions
                 .iter()
@@ -797,7 +825,7 @@ mod tests {
     #[test]
     fn parse_llm_empty_actions_returns_none() {
         let json = r#"{"actions": []}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
+        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert_eq!(decisions, vec![RouteDecision::None]);
     }
 
@@ -807,7 +835,7 @@ mod tests {
             "Some text\n```json\n{}\n```\nmore text",
             r#"{"actions": [{"type": "route", "target": "coder", "context": "fix"}]}"#
         );
-        let decisions = parse_llm_response(&md, &valid_sessions(), 5, "task");
+        let decisions = parse_llm_response(&md, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         match &decisions[0] {
             RouteDecision::Route { target, payload } => {
                 assert_eq!(target, "coder");
@@ -820,14 +848,14 @@ mod tests {
     #[test]
     fn parse_llm_missing_actions_object_falls_back_to_none() {
         let json = r#"{"reasoning": "done"}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
+        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert_eq!(decisions, vec![RouteDecision::None]);
     }
 
     #[test]
     fn parse_llm_collect_returns_select() {
         let json = r#"{"actions": [{"type": "collect", "candidates": ["coder", "reviewer"]}]}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
+        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         match &decisions[0] {
             RouteDecision::Select { candidates } => {
                 assert_eq!(
@@ -846,14 +874,14 @@ mod tests {
             {"type": "route", "target": "reviewer", "context": "b"},
             {"type": "route", "target": "coder", "context": "c"}
         ]}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 2, "task");
+        let decisions = parse_llm_response(json, &valid_sessions(), 2, "task", PermissionPolicy::Allow);
         assert_eq!(decisions.len(), 2);
     }
 
     #[test]
     fn parse_llm_unknown_action_type_returns_error() {
         let json = r#"{"actions": [{"type": "fly", "target": "moon"}]}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
+        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert!(
             decisions
                 .iter()
@@ -1041,7 +1069,7 @@ mod tests {
     fn parse_llm_dynamic_route_with_driver_field() {
         let json = r#"{"actions": [{"type": "route", "target": "spy", "driver": "codex", "context": "sneak"}], "reasoning": "ok"}"#;
         // "spy" is NOT in valid_sessions, but `driver` field should allow it
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
+        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert_eq!(decisions.len(), 1);
         match &decisions[0] {
             RouteDecision::DynamicRoute {
@@ -1061,13 +1089,13 @@ mod tests {
 
     #[test]
     fn parse_llm_dynamic_route_with_grpc_driver() {
-        let json = r#"{"actions": [{"type": "route", "target": "remote", "driver": "grpc:localhost:50051", "context": "do stuff"}], "reasoning": "ok"}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
+        let json = r#"{"actions": [{"type": "route", "target": "remote", "driver": "grpc:agent.example.com:50051", "context": "do stuff"}], "reasoning": "ok"}"#;
+        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert_eq!(decisions.len(), 1);
         match &decisions[0] {
             RouteDecision::DynamicRoute { target, driver, .. } => {
                 assert_eq!(target, "remote");
-                assert_eq!(*driver, DriverKind::Grpc("localhost:50051".into()));
+                assert_eq!(*driver, DriverKind::Grpc("agent.example.com:50051".into()));
             }
             other => panic!("expected DynamicRoute, got {other:?}"),
         }
@@ -1076,7 +1104,7 @@ mod tests {
     #[test]
     fn parse_llm_unknown_driver_returns_error() {
         let json = r#"{"actions": [{"type": "route", "target": "spy", "driver": "nonexistent", "context": "x"}], "reasoning": "bad"}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
+        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert_eq!(decisions.len(), 1);
         assert!(
             matches!(&decisions[0], RouteDecision::Error(msg) if msg.contains("unknown driver"))
@@ -1086,7 +1114,7 @@ mod tests {
     #[test]
     fn parse_llm_unknown_target_without_driver_mentions_driver_field() {
         let json = r#"{"actions": [{"type": "route", "target": "ghost", "context": "x"}], "reasoning": "bad"}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task");
+        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert_eq!(decisions.len(), 1);
         assert!(matches!(&decisions[0], RouteDecision::Error(msg) if msg.contains("driver")));
     }

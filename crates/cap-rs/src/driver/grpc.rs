@@ -105,15 +105,15 @@ async fn run_stream(
 
     // Build the first message and a stream for subsequent ones.
     let first_msg = frame_to_client_message(first_frame);
-    let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel::<ClientMessage>();
-    request_tx.send(first_msg).map_err(|_| {
+    let (request_tx, request_rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+    request_tx.send(first_msg).await.map_err(|_| {
         DriverError::Io(std::io::Error::new(
             std::io::ErrorKind::BrokenPipe,
             "gRPC request channel closed",
         ))
     })?;
 
-    let request_stream = tokio_stream::wrappers::UnboundedReceiverStream::new(request_rx);
+    let request_stream = tokio_stream::wrappers::ReceiverStream::new(request_rx);
 
     let response = client
         .chat(request_stream)
@@ -162,11 +162,11 @@ async fn run_stream(
 
 async fn write_loop(
     mut frame_rx: mpsc::Receiver<ClientFrame>,
-    request_tx: tokio::sync::mpsc::UnboundedSender<ClientMessage>,
+    request_tx: mpsc::Sender<ClientMessage>,
 ) {
     while let Some(frame) = frame_rx.recv().await {
         let msg = frame_to_client_message(frame);
-        if request_tx.send(msg).is_err() {
+        if request_tx.send(msg).await.is_err() {
             break;
         }
     }
