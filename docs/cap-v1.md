@@ -1,6 +1,5 @@
-# CAP — CLI Agent Protocol (Core v1, draft)
+# CAP — CLI Agent Protocol (Core v1)
 
-> **Status**: `draft-2026-05-18`
 > **Full name**: CLI Agent Protocol
 > **Homepage**: <https://cap-protocol.org>
 > **Editors**: rsclaw maintainers
@@ -44,8 +43,8 @@ Keywords MUST, SHOULD, MAY follow [RFC 2119][rfc2119].
 
 Terminology:
 
-- **Agent** — a command-line AI program (e.g. `claude`, `aider`,
-  `terraform-agent`). Agents have a stable `name`, a binary on PATH,
+- **Agent** — a command-line AI program (e.g. `claude`, `opencode`, `codex`, 
+  `openclaude`, `qoder`, `aider`,). Agents have a stable `name`, a binary on PATH,
   and a Manifest (§5).
 - **Driver** — a CAP implementation that controls an Agent via one of
   the bindings in §6.
@@ -1034,4 +1033,4 @@ Reverse RPC mapping for coding profile is in
 
 | Date | Notes |
 |---|---|
-| 2026-05-18 | Initial CLI-Agent-Protocol draft. Replaces earlier "Coding Agent Protocol" v1 working name. PTY promoted to REQUIRED substrate. Profiles introduced. A2A binding added. |
+| 2026-05-18 | Initial CLI-Agent-Protocol, Replaces earlier "Coding Agent Protocol" v1 working name. PTY promoted to REQUIRED substrate. Profiles introduced. A2A binding added. |
