@@ -648,6 +648,15 @@ async fn reader_task(
     // exit) where it's still the right behaviour — the upstream
     // CapLiveManager waiter would otherwise hang forever.
     let mut done_emitted = false;
+    // De-dupe the streamed-then-snapshotted assistant text. OpenCode's
+    // `--output-format stream-json` (and claudecode with
+    // `--include-partial-messages`) emit the assistant text TWICE: first
+    // token-by-token via `stream_event`/`text_delta` (TextChunk with an EMPTY
+    // msg_id), then again as the complete `assistant` frame block (TextChunk
+    // with a SET msg_id). Forwarding both doubles the reply ("OoposOopos").
+    // Once we've streamed text for the current message, drop the matching
+    // full-text snapshot; reset at each tool-call/message boundary and Done.
+    let mut streamed_text = false;
     let mut lines = BufReader::new(stdout).lines();
     loop {
         match lines.next_line().await {
@@ -655,8 +664,29 @@ async fn reader_task(
                 trace!(line = %line, "← agent");
                 for event in parse_stream_line(&line, false) {
                     trace!(event = ?event, "parsed event");
+                    let mut skip = false;
+                    match &event {
+                        AgentEvent::TextChunk { msg_id, channel, .. }
+                            if *channel == TextChannel::Assistant =>
+                        {
+                            if msg_id.is_empty() {
+                                // A streamed token delta — arm the de-dupe.
+                                streamed_text = true;
+                            } else if streamed_text {
+                                // Full-text snapshot of already-streamed text.
+                                skip = true;
+                            }
+                        }
+                        AgentEvent::ToolCallStart { .. } => streamed_text = false,
+                        _ => {}
+                    }
                     if matches!(event, AgentEvent::Done { .. }) {
                         done_emitted = true;
+                        streamed_text = false;
+                    }
+                    if skip {
+                        trace!("reader: dropping duplicate assistant snapshot");
+                        continue;
                     }
                     if tx.send(event).await.is_err() {
                         exited.store(true, std::sync::atomic::Ordering::Relaxed);
