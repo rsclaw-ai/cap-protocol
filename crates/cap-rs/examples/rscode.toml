@@ -1,0 +1,18 @@
+[agent]
+name = "rscode"
+binary = "rscode"
+profiles = []
+
+[startup]
+command = ["rscode", "run", "--input-stream-json", "--output-stream-json"]
+ready_when = { pattern = "^>" }
+
+[fast_path]
+stream_json = ["rscode", "run", "--input-stream-json", "--output-stream-json"]
+
+[pty]
+cols = 120
+rows = 40
+
+[capabilities]
+streaming_output = true
