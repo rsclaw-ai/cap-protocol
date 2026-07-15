@@ -133,6 +133,7 @@ async fn main() -> anyhow::Result<()> {
                 match ev {
                     Some(AgentEvent::Ready { session_id, .. }) => {
                         ready_count += 1;
+                        let session_id = session_id.as_deref().unwrap_or("<none>");
                         println!(
                             "[CAP] ◀ Ready #{ready_count}  session={session_id}  @{:.2?}",
                             started.elapsed()

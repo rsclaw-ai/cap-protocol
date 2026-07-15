@@ -671,7 +671,10 @@ mod tests {
         assert_eq!(events.len(), 1);
         match &events[0] {
             AgentEvent::Ready { session_id, .. } => {
-                assert_eq!(session_id.as_deref(), Some("019e3ac0-dc0e-7f12-81b6-9127bbdca87f"));
+                assert_eq!(
+                    session_id.as_deref(),
+                    Some("019e3ac0-dc0e-7f12-81b6-9127bbdca87f")
+                );
             }
             other => panic!("wrong: {other:?}"),
         }

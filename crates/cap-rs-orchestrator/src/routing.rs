@@ -783,7 +783,8 @@ mod tests {
     #[test]
     fn parse_llm_route_to_known_session() {
         let json = r#"{"actions": [{"type": "route", "target": "reviewer", "context": "review this"}], "reasoning": "ok"}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
+        let decisions =
+            parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert_eq!(decisions.len(), 1);
         match &decisions[0] {
             RouteDecision::Route { target, payload } => {
@@ -797,14 +798,16 @@ mod tests {
     #[test]
     fn parse_llm_complete_returns_none() {
         let json = r#"{"actions": [], "reasoning": "done"}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
+        let decisions =
+            parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert_eq!(decisions, vec![RouteDecision::None]);
     }
 
     #[test]
     fn parse_llm_invalid_target_returns_error() {
         let json = r#"{"actions": [{"type": "route", "target": "ghost", "context": "hi"}]}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
+        let decisions =
+            parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert!(
             decisions
                 .iter()
@@ -814,7 +817,13 @@ mod tests {
 
     #[test]
     fn parse_llm_garbage_text_returns_error() {
-        let decisions = parse_llm_response("not json at all", &valid_sessions(), 5, "task", PermissionPolicy::Allow);
+        let decisions = parse_llm_response(
+            "not json at all",
+            &valid_sessions(),
+            5,
+            "task",
+            PermissionPolicy::Allow,
+        );
         assert!(
             decisions
                 .iter()
@@ -825,7 +834,8 @@ mod tests {
     #[test]
     fn parse_llm_empty_actions_returns_none() {
         let json = r#"{"actions": []}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
+        let decisions =
+            parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert_eq!(decisions, vec![RouteDecision::None]);
     }
 
@@ -835,7 +845,8 @@ mod tests {
             "Some text\n```json\n{}\n```\nmore text",
             r#"{"actions": [{"type": "route", "target": "coder", "context": "fix"}]}"#
         );
-        let decisions = parse_llm_response(&md, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
+        let decisions =
+            parse_llm_response(&md, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         match &decisions[0] {
             RouteDecision::Route { target, payload } => {
                 assert_eq!(target, "coder");
@@ -848,14 +859,16 @@ mod tests {
     #[test]
     fn parse_llm_missing_actions_object_falls_back_to_none() {
         let json = r#"{"reasoning": "done"}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
+        let decisions =
+            parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert_eq!(decisions, vec![RouteDecision::None]);
     }
 
     #[test]
     fn parse_llm_collect_returns_select() {
         let json = r#"{"actions": [{"type": "collect", "candidates": ["coder", "reviewer"]}]}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
+        let decisions =
+            parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         match &decisions[0] {
             RouteDecision::Select { candidates } => {
                 assert_eq!(
@@ -874,14 +887,16 @@ mod tests {
             {"type": "route", "target": "reviewer", "context": "b"},
             {"type": "route", "target": "coder", "context": "c"}
         ]}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 2, "task", PermissionPolicy::Allow);
+        let decisions =
+            parse_llm_response(json, &valid_sessions(), 2, "task", PermissionPolicy::Allow);
         assert_eq!(decisions.len(), 2);
     }
 
     #[test]
     fn parse_llm_unknown_action_type_returns_error() {
         let json = r#"{"actions": [{"type": "fly", "target": "moon"}]}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
+        let decisions =
+            parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert!(
             decisions
                 .iter()
@@ -1069,7 +1084,8 @@ mod tests {
     fn parse_llm_dynamic_route_with_driver_field() {
         let json = r#"{"actions": [{"type": "route", "target": "spy", "driver": "codex", "context": "sneak"}], "reasoning": "ok"}"#;
         // "spy" is NOT in valid_sessions, but `driver` field should allow it
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
+        let decisions =
+            parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert_eq!(decisions.len(), 1);
         match &decisions[0] {
             RouteDecision::DynamicRoute {
@@ -1090,7 +1106,8 @@ mod tests {
     #[test]
     fn parse_llm_dynamic_route_with_grpc_driver() {
         let json = r#"{"actions": [{"type": "route", "target": "remote", "driver": "grpc:agent.example.com:50051", "context": "do stuff"}], "reasoning": "ok"}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
+        let decisions =
+            parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert_eq!(decisions.len(), 1);
         match &decisions[0] {
             RouteDecision::DynamicRoute { target, driver, .. } => {
@@ -1104,7 +1121,8 @@ mod tests {
     #[test]
     fn parse_llm_unknown_driver_returns_error() {
         let json = r#"{"actions": [{"type": "route", "target": "spy", "driver": "nonexistent", "context": "x"}], "reasoning": "bad"}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
+        let decisions =
+            parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert_eq!(decisions.len(), 1);
         assert!(
             matches!(&decisions[0], RouteDecision::Error(msg) if msg.contains("unknown driver"))
@@ -1114,7 +1132,8 @@ mod tests {
     #[test]
     fn parse_llm_unknown_target_without_driver_mentions_driver_field() {
         let json = r#"{"actions": [{"type": "route", "target": "ghost", "context": "x"}], "reasoning": "bad"}"#;
-        let decisions = parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
+        let decisions =
+            parse_llm_response(json, &valid_sessions(), 5, "task", PermissionPolicy::Allow);
         assert_eq!(decisions.len(), 1);
         assert!(matches!(&decisions[0], RouteDecision::Error(msg) if msg.contains("driver")));
     }

@@ -139,6 +139,8 @@ fn driver_kind_from_agent_manifest(
                 "claude-code" => return Some(DriverKind::Claude),
                 "openclaude" => return Some(DriverKind::OpenClaude),
                 "opencode" => return Some(DriverKind::OpenCode),
+                "rscode" => return Some(DriverKind::Rscode),
+                "codebuddy" => return Some(DriverKind::Codebuddy),
                 _ => return Some(DriverKind::Pty(manifest.agent.binary.clone())),
             },
             BindingKind::AcpStdio => {
@@ -172,7 +174,7 @@ pub enum PermissionPolicy {
     Bypass,
 }
 
-/// `claude` | `openclaude` | `codex` | `opencode` | `qoder` | `aider` | `grpc:<addr>` | `acp:<command>` | `pty:<command>`.
+/// `claude` | `openclaude` | `codex` | `opencode` | `qoder` | `rscode` | `codebuddy` | `aider` | `grpc:<addr>` | `acp:<command>` | `pty:<command>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriverKind {
     Claude,
@@ -183,6 +185,10 @@ pub enum DriverKind {
     OpenCode,
     /// Qoder CLI via stream-json (Claude Code-compatible NDJSON frames).
     Qoder,
+    /// Rscode CLI via stream-json (Claude Code-compatible NDJSON frames).
+    Rscode,
+    /// Codebuddy CLI via stream-json (Claude Code-compatible NDJSON frames).
+    Codebuddy,
     /// Aider chat via PTY (<https://github.com/paul-gauthier/aider>).
     Aider,
     /// Structured Agent Client Protocol agent (e.g. `acp:opencode`).
@@ -209,6 +215,8 @@ fn parse_driver_kind(s: &str) -> Result<DriverKind, String> {
         "codex" => Ok(DriverKind::Codex),
         "opencode" => Ok(DriverKind::OpenCode),
         "qoder" => Ok(DriverKind::Qoder),
+        "rscode" => Ok(DriverKind::Rscode),
+        "codebuddy" => Ok(DriverKind::Codebuddy),
         "aider" => Ok(DriverKind::Aider),
         other => {
             if let Some(addr) = other.strip_prefix("grpc:") {
@@ -241,7 +249,7 @@ fn parse_driver_kind(s: &str) -> Result<DriverKind, String> {
                 Ok(DriverKind::Pty(cmd.to_string()))
             } else {
                 Err(format!(
-                    "unknown driver kind '{other}' (expected claude | openclaude | codex | opencode | qoder | aider | grpc:<host:port> | a2a:<http-url> | acp:<cmd> | pty:<cmd>)"
+                    "unknown driver kind '{other}' (expected claude | openclaude | codex | opencode | qoder | rscode | codebuddy | aider | grpc:<host:port> | a2a:<http-url> | acp:<cmd> | pty:<cmd>)"
                 ))
             }
         }
@@ -263,6 +271,8 @@ pub fn list_driver_kinds() -> Vec<&'static str> {
         "codex        OpenAI Codex CLI (stream-json, Claude Code-compatible)",
         "opencode     OpenCode CLI (stream-json, Claude Code-compatible)",
         "qoder        Qoder CLI (stream-json, Claude Code-compatible)",
+        "rscode       Rscode CLI (stream-json, Claude Code-compatible)",
+        "codebuddy    Codebuddy CLI (stream-json, Claude Code-compatible)",
         "aider        Aider chat via PTY (https://github.com/paul-gauthier/aider)",
         "a2a:<url>    A2A HTTPS+SSE endpoint (e.g. a2a:http://127.0.0.1:4000)",
         "acp:<cmd>    Any ACP-compatible agent (e.g. acp:opencode)",
@@ -921,6 +931,36 @@ fleet:
     }
 
     #[test]
+    fn parses_rscode_and_codebuddy_driver_kinds() {
+        let yaml = r#"
+fleet:
+  base_branch: main
+  sessions:
+    rs: { driver: rscode }
+    cb: { driver: codebuddy }
+  start: rs
+"#;
+        let spec = FleetSpec::from_yaml(yaml).unwrap();
+        assert_eq!(spec.fleet.sessions["rs"].driver, Some(DriverKind::Rscode));
+        assert_eq!(
+            spec.fleet.sessions["cb"].driver,
+            Some(DriverKind::Codebuddy)
+        );
+    }
+
+    #[test]
+    fn rscode_manifest_selects_stream_json_driver() {
+        let manifest = cap_rs::manifest::AgentManifest::from_path(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../cap-rs/examples/rscode.toml"),
+        )
+        .unwrap();
+        assert_eq!(
+            driver_kind_from_agent_manifest(&manifest),
+            Some(DriverKind::Rscode)
+        );
+    }
+
+    #[test]
     fn parses_pty_driver_kind() {
         let yaml = r#"
 fleet:
@@ -1123,7 +1163,9 @@ fleet:
         let spec = FleetSpec::from_yaml(yaml).unwrap();
         assert_eq!(
             spec.fleet.sessions["agent"].driver,
-            Some(DriverKind::A2a("https://agent.example.com:4000/agent".into()))
+            Some(DriverKind::A2a(
+                "https://agent.example.com:4000/agent".into()
+            ))
         );
         spec.validate().unwrap();
     }

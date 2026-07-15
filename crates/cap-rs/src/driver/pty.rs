@@ -1528,12 +1528,8 @@ fn is_sensitive_env_var(name: &str) -> bool {
         "DOCKER_PASSWORD",
         "CODESPACES_TOKEN",
     ];
-    const SUFFIXES: &[&str] = &[
-        "_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_CREDENTIALS",
-    ];
-    const PREFIXES: &[&str] = &[
-        "AWS_", "GCP_", "AZURE_", "GOOGLE_",
-    ];
+    const SUFFIXES: &[&str] = &["_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_CREDENTIALS"];
+    const PREFIXES: &[&str] = &["AWS_", "GCP_", "AZURE_", "GOOGLE_"];
 
     if EXACT.contains(&name) {
         return true;

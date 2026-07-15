@@ -7,11 +7,10 @@
 //! - `qoder` → `stream-json` (Claude Code-compatible NDJSON)
 //! - `acp:<cmd>` → ACP over stdio
 //!
-//! For `opencode` and `codex`, only fork versions support stream-json flags;
-//! vanilla binaries reject them and exit immediately. We spawn optimistically
-//! and check for early exit (~200ms), falling back to native drivers (ACP /
-//! MCP) when the binary doesn't support stream-json. A `--help` probe is
-//! used as confirmation after failure and cached to skip future attempts.
+//! For `opencode` and `codex`, stream-json is optional. We check `--help`
+//! before spawning and use the native driver (ACP / MCP) when the installed
+//! CLI does not advertise stream-json support. An early-exit check remains as
+//! a guard for forks whose help output is inaccurate.
 //!
 //! `pty:<cmd>` remains the universal screen-scraping fallback; `pty:codex`
 //! still works (with the codex-tuned [`TuiParser::codex`]) if a caller needs
@@ -40,13 +39,56 @@ use crate::factory::DriverFactory;
 
 static PROBE_CACHE: Mutex<Option<std::collections::HashMap<String, bool>>> = Mutex::new(None);
 
+fn default_codex_stream_bin() -> String {
+    std::env::var("CODEX_STREAM_BIN")
+        .or_else(|_| std::env::var("CODEX_BIN"))
+        .unwrap_or_else(|_| "codex".into())
+}
+
+fn default_codex_mcp_bin() -> String {
+    codex_mcp_bin(std::env::var("CODEX_MCP_BIN").ok())
+}
+
+fn codex_mcp_bin(configured: Option<String>) -> String {
+    configured.unwrap_or_else(|| "codex".into())
+}
+
+fn codex_mcp_settings(policy: PermissionPolicy) -> (&'static str, &'static str) {
+    match policy {
+        PermissionPolicy::Ask => ("on-request", "workspace-write"),
+        PermissionPolicy::Allow => ("never", "workspace-write"),
+        PermissionPolicy::Deny => ("never", "read-only"),
+        PermissionPolicy::Bypass => ("never", "danger-full-access"),
+    }
+}
+
+fn codebuddy_settings(policy: PermissionPolicy) -> (&'static str, bool) {
+    match policy {
+        PermissionPolicy::Ask => ("default", false),
+        PermissionPolicy::Allow => ("bypassPermissions", false),
+        PermissionPolicy::Deny => ("dontAsk", false),
+        PermissionPolicy::Bypass => ("default", true),
+    }
+}
+
+fn codex_mcp_builder(
+    cwd: &Path,
+    policy: PermissionPolicy,
+    bin: String,
+) -> cap_rs::driver::codex_mcp::CodexMcpBuilder {
+    let (approval, sandbox) = codex_mcp_settings(policy);
+    CodexMcpDriver::builder(cwd)
+        .bin(bin)
+        .approval_policy(approval)
+        .sandbox(sandbox)
+}
+
 /// Probe whether a binary supports stream-json by running `<bin> <subcmd> --help`
 /// and checking if the output contains `keyword`. Results are cached per
 /// `(bin, subcmd)` pair to avoid redundant process spawns across sessions.
 ///
-/// Retained for testing; the production path uses optimistic spawn + early-exit
-/// detection instead.
-#[cfg(test)]
+/// The production path probes before spawning, so unsupported CLIs select
+/// their native fallback without first creating a doomed stream-json process.
 async fn probe_stream_json_support(bin: &str, subcmd: &[&str], keyword: &str) -> bool {
     let cache_key = format!("{}:{}", bin, subcmd.join(","));
 
@@ -84,15 +126,92 @@ async fn probe_stream_json_support(bin: &str, subcmd: &[&str], keyword: &str) ->
     result
 }
 
-/// Cache a negative probe result after an optimistic spawn failure, so
-/// subsequent sessions skip straight to the fallback driver without
-/// re-probing `--help`.
-fn record_probe_negative(bin: &str, subcmd: &[&str]) {
-    let cache_key = format!("{}:{}", bin, subcmd.join(","));
-    if let Ok(mut cache) = PROBE_CACHE.lock() {
-        cache
-            .get_or_insert_with(Default::default)
-            .insert(cache_key, false);
+async fn build_codex_driver(
+    cwd: &Path,
+    policy: PermissionPolicy,
+    stream_bin: String,
+    mcp_bin: String,
+) -> Result<Box<dyn Driver>, OrchestratorError> {
+    let bypass = policy == PermissionPolicy::Bypass;
+    if !probe_stream_json_support(&stream_bin, &["exec"], "stream-json").await {
+        info!(bin = %stream_bin, mcp_bin = %mcp_bin, "codex: stream-json unsupported, using codex-mcp");
+        let driver = codex_mcp_builder(cwd, policy, mcp_bin).spawn().await?;
+        return Ok(Box::new(driver));
+    }
+
+    match ClaudeCodeDriver::codex_builder(cwd)
+        .bin(stream_bin.clone())
+        .dangerously_skip_permissions(bypass)
+        .spawn()
+        .await
+    {
+        Ok(mut driver) => {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if driver.is_alive() {
+                info!(bin = %stream_bin, "codex: using stream-json driver");
+                Ok(Box::new(driver))
+            } else {
+                warn!(bin = %stream_bin, mcp_bin = %mcp_bin, "codex: stream-json spawn exited early, falling back to codex-mcp");
+                let _ = driver.shutdown().await;
+                let _ = probe_stream_json_support(&stream_bin, &["exec"], "stream-json").await;
+                let driver = codex_mcp_builder(cwd, policy, mcp_bin).spawn().await?;
+                Ok(Box::new(driver))
+            }
+        }
+        Err(cap_rs::driver::DriverError::BinaryNotFound(_)) => {
+            info!(bin = %stream_bin, "codex: binary not found");
+            Err(OrchestratorError::Driver(
+                cap_rs::driver::DriverError::BinaryNotFound(stream_bin),
+            ))
+        }
+        Err(e) => {
+            warn!(bin = %stream_bin, mcp_bin = %mcp_bin, error = %e, "codex: stream-json spawn failed, falling back to codex-mcp");
+            let driver = codex_mcp_builder(cwd, policy, mcp_bin).spawn().await?;
+            Ok(Box::new(driver))
+        }
+    }
+}
+
+async fn spawn_opencode_acp(cwd: &Path, bin: String) -> Result<Box<dyn Driver>, OrchestratorError> {
+    let driver = AcpDriver::builder(bin, cwd).arg("acp").spawn().await?;
+    Ok(Box::new(driver))
+}
+
+async fn build_opencode_driver(
+    cwd: &Path,
+    bin: String,
+) -> Result<Box<dyn Driver>, OrchestratorError> {
+    if !probe_stream_json_support(&bin, &["run"], "stream-json").await {
+        info!(bin = %bin, "opencode: stream-json unsupported, using ACP");
+        return spawn_opencode_acp(cwd, bin).await;
+    }
+
+    match ClaudeCodeDriver::opencode_builder(cwd)
+        .bin(bin.clone())
+        .spawn()
+        .await
+    {
+        Ok(mut driver) => {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if driver.is_alive() {
+                info!(bin = %bin, "opencode: using stream-json driver");
+                Ok(Box::new(driver))
+            } else {
+                warn!(bin = %bin, "opencode: stream-json spawn exited early, falling back to ACP");
+                let _ = driver.shutdown().await;
+                spawn_opencode_acp(cwd, bin).await
+            }
+        }
+        Err(cap_rs::driver::DriverError::BinaryNotFound(_)) => {
+            info!(bin = %bin, "opencode: binary not found");
+            Err(OrchestratorError::Driver(
+                cap_rs::driver::DriverError::BinaryNotFound(bin),
+            ))
+        }
+        Err(e) => {
+            warn!(bin = %bin, error = %e, "opencode: stream-json spawn failed, falling back to ACP");
+            spawn_opencode_acp(cwd, bin).await
+        }
     }
 }
 
@@ -125,53 +244,12 @@ impl DriverFactory for RealDriverFactory {
                     .await?;
                 Ok(Box::new(driver))
             }
-            // opencode: try stream-json optimistically, fall back to ACP.
-            // Fork versions add `--output-format stream-json` to `opencode run`;
-            // vanilla opencode rejects the flag and exits immediately. We
-            // spawn and check for early exit rather than probing `--help`
-            // first — faster on the happy path (no extra process spawn).
+            // OpenCode falls back to ACP when its installed CLI does not
+            // advertise stream-json. Keep the early-exit check for forks
+            // whose advertised capability disagrees with their parser.
             DriverKind::OpenCode => {
                 let bin = std::env::var("OPENCODE_BIN").unwrap_or_else(|_| "opencode".into());
-
-                // Skip optimistic spawn if a prior probe already said no.
-                let cached = PROBE_CACHE
-                    .lock()
-                    .ok()
-                    .and_then(|c| c.as_ref().and_then(|m| m.get(&format!("{bin}:run")).copied()));
-
-                if cached == Some(false) {
-                    info!(bin = %bin, "opencode: stream-json known-unsupported, using ACP");
-                    let driver = AcpDriver::opencode(cwd).await?;
-                    return Ok(Box::new(driver));
-                }
-
-                match ClaudeCodeDriver::opencode_builder(cwd).spawn().await {
-                    Ok(mut driver) => {
-                        // Give the process a moment to reject unknown flags.
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                        if driver.is_alive() {
-                            info!(bin = %bin, "opencode: using stream-json driver");
-                            Ok(Box::new(driver))
-                        } else {
-                            warn!(bin = %bin, "opencode: stream-json spawn exited early, falling back to ACP");
-                            let _ = driver.shutdown().await;
-                            record_probe_negative(&bin, &["run"]);
-                            let driver = AcpDriver::opencode(cwd).await?;
-                            Ok(Box::new(driver))
-                        }
-                    }
-                    Err(cap_rs::driver::DriverError::BinaryNotFound(_)) => {
-                        info!(bin = %bin, "opencode: binary not found");
-                        Err(OrchestratorError::Driver(
-                            cap_rs::driver::DriverError::BinaryNotFound(bin),
-                        ))
-                    }
-                    Err(e) => {
-                        warn!(bin = %bin, error = %e, "opencode: stream-json spawn failed, falling back to ACP");
-                        let driver = AcpDriver::opencode(cwd).await?;
-                        Ok(Box::new(driver))
-                    }
-                }
+                build_opencode_driver(cwd, bin).await
             }
             // codex: try stream-json optimistically, fall back to codex-mcp.
             // Fork versions add `--input-format stream-json` to `codex exec`;
@@ -179,63 +257,38 @@ impl DriverFactory for RealDriverFactory {
             // spawn and check for early exit rather than probing `--help`
             // first — faster on the happy path (no extra process spawn).
             DriverKind::Codex => {
-                let bin = std::env::var("CODEX_BIN").unwrap_or_else(|_| "codex".into());
-
-                // Skip optimistic spawn if a prior probe already said no.
-                let cached = PROBE_CACHE
-                    .lock()
-                    .ok()
-                    .and_then(|c| c.as_ref().and_then(|m| m.get(&format!("{bin}:exec")).copied()));
-
-                if cached == Some(false) {
-                    info!(bin = %bin, "codex: stream-json known-unsupported, using codex-mcp");
-                    let mut builder = CodexMcpDriver::builder(cwd);
-                    if bypass {
-                        builder = builder.approval_policy("never");
-                    }
-                    let driver = builder.spawn().await?;
-                    return Ok(Box::new(driver));
-                }
-
-                match ClaudeCodeDriver::codex_builder(cwd)
-                    .dangerously_skip_permissions(bypass)
+                build_codex_driver(
+                    cwd,
+                    policy,
+                    default_codex_stream_bin(),
+                    default_codex_mcp_bin(),
+                )
+                .await
+            }
+            DriverKind::Rscode => {
+                let driver = ClaudeCodeDriver::rscode_builder(cwd)
+                    // RSCode's stream input owns stdin, so Allow/Bypass must
+                    // use its non-interactive approval switch. Ask/Deny remain
+                    // fail-closed when a tool needs approval.
+                    .dangerously_skip_permissions(matches!(
+                        policy,
+                        PermissionPolicy::Allow | PermissionPolicy::Bypass
+                    ))
                     .spawn()
-                    .await
-                {
-                    Ok(mut driver) => {
-                        // Give the process a moment to reject unknown flags.
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                        if driver.is_alive() {
-                            info!(bin = %bin, "codex: using stream-json driver");
-                            Ok(Box::new(driver))
-                        } else {
-                            warn!(bin = %bin, "codex: stream-json spawn exited early, falling back to codex-mcp");
-                            let _ = driver.shutdown().await;
-                            record_probe_negative(&bin, &["exec"]);
-                            let mut builder = CodexMcpDriver::builder(cwd);
-                            if bypass {
-                                builder = builder.approval_policy("never");
-                            }
-                            let driver = builder.spawn().await?;
-                            Ok(Box::new(driver))
-                        }
-                    }
-                    Err(cap_rs::driver::DriverError::BinaryNotFound(_)) => {
-                        info!(bin = %bin, "codex: binary not found");
-                        Err(OrchestratorError::Driver(
-                            cap_rs::driver::DriverError::BinaryNotFound(bin),
-                        ))
-                    }
-                    Err(e) => {
-                        warn!(bin = %bin, error = %e, "codex: stream-json spawn failed, falling back to codex-mcp");
-                        let mut builder = CodexMcpDriver::builder(cwd);
-                        if bypass {
-                            builder = builder.approval_policy("never");
-                        }
-                        let driver = builder.spawn().await?;
-                        Ok(Box::new(driver))
-                    }
-                }
+                    .await?;
+                Ok(Box::new(driver))
+            }
+            DriverKind::Codebuddy => {
+                let bin = std::env::var("CODEBUDDY_BIN").unwrap_or_else(|_| "codebuddy".into());
+                let (permission_mode, skip_permissions) = codebuddy_settings(policy);
+                let driver = ClaudeCodeDriver::builder(cwd)
+                    .bin(bin)
+                    .prompt_after_ready(false)
+                    .permission_mode(permission_mode)
+                    .dangerously_skip_permissions(skip_permissions)
+                    .spawn()
+                    .await?;
+                Ok(Box::new(driver))
             }
             DriverKind::Qoder => {
                 let driver = ClaudeCodeDriver::builder(cwd)
@@ -287,34 +340,16 @@ impl DriverFactory for RealDriverFactory {
 
 #[cfg(test)]
 mod tests {
-    use cap_rs::driver::DriverError;
-
     use super::*;
 
-    #[tokio::test]
-    async fn codex_optimistic_spawn_falls_back_when_unsupported() {
-        let temp = tempfile::tempdir().unwrap();
-        let factory = RealDriverFactory;
-        let result = factory
-            .build(
-                &"codex".to_string(),
-                &DriverKind::Codex,
-                temp.path(),
-                PermissionPolicy::Ask,
-            )
-            .await;
+    #[cfg(unix)]
+    fn write_executable(path: &Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
 
-        match result {
-            // codex binary not installed at all
-            Err(OrchestratorError::Driver(DriverError::BinaryNotFound(_))) => {}
-            // spawned successfully (stream-json or fallback mcp)
-            Ok(mut driver) => {
-                driver.shutdown().await.unwrap();
-            }
-            // optimistic spawn exited early, fallback also failed (e.g. codex
-            // installed but mcp-server subcommand not available)
-            Err(_) => {}
-        }
+        std::fs::write(path, contents).unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
     }
 
     #[tokio::test]
@@ -327,11 +362,103 @@ mod tests {
 
     #[tokio::test]
     async fn probe_caches_results() {
-        let r1 =
-            probe_stream_json_support("probe-cache-test-bin", &["run"], "stream-json").await;
-        let r2 =
-            probe_stream_json_support("probe-cache-test-bin", &["run"], "stream-json").await;
+        let r1 = probe_stream_json_support("probe-cache-test-bin", &["run"], "stream-json").await;
+        let r2 = probe_stream_json_support("probe-cache-test-bin", &["run"], "stream-json").await;
         assert_eq!(r1, r2);
     }
-}
 
+    #[test]
+    fn codex_mcp_fallback_has_an_independent_binary() {
+        assert_eq!(codex_mcp_bin(None), "codex");
+        assert_eq!(
+            codex_mcp_bin(Some("/custom/codex-mcp".into())),
+            "/custom/codex-mcp"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_unsupported_stream_uses_independent_mcp_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let stream_bin = dir.path().join("codex-stream");
+        let mcp_bin = dir.path().join("codex-mcp");
+
+        write_executable(
+            &stream_bin,
+            "#!/bin/sh\ncase \" $* \" in *\" --help \"*) echo 'usage: fake'; exit 0;; esac\nexit 2\n",
+        );
+        write_executable(
+            &mcp_bin,
+            "#!/bin/sh\nIFS= read -r line || exit 1\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'\nwhile IFS= read -r line; do :; done\n",
+        );
+
+        let mut driver = build_codex_driver(
+            dir.path(),
+            PermissionPolicy::Deny,
+            stream_bin.display().to_string(),
+            mcp_bin.display().to_string(),
+        )
+        .await
+        .expect("fallback MCP driver should complete its handshake");
+
+        assert!(driver.is_alive());
+        driver.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_unsupported_stream_uses_its_native_acp_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("opencode");
+
+        write_executable(
+            &bin,
+            "#!/bin/sh\ncase \" $* \" in *\" run --help \"*) echo 'usage: fake'; exit 0;; esac\nIFS= read -r line || exit 1\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'\nIFS= read -r line || exit 1\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"fake-session\"}}'\nwhile IFS= read -r line; do :; done\n",
+        );
+
+        let mut driver = build_opencode_driver(dir.path(), bin.display().to_string())
+            .await
+            .expect("fallback ACP driver should complete its handshake");
+
+        assert!(matches!(
+            driver.next_event().await,
+            Some(cap_rs::core::AgentEvent::Ready { session_id: Some(id), .. }) if id == "fake-session"
+        ));
+        driver.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn codex_mcp_permissions_fail_closed() {
+        assert_eq!(
+            codex_mcp_settings(PermissionPolicy::Ask),
+            ("on-request", "workspace-write")
+        );
+        assert_eq!(
+            codex_mcp_settings(PermissionPolicy::Deny),
+            ("never", "read-only")
+        );
+        assert_eq!(
+            codex_mcp_settings(PermissionPolicy::Bypass),
+            ("never", "danger-full-access")
+        );
+    }
+    #[test]
+    fn codebuddy_permissions_cover_every_policy() {
+        assert_eq!(
+            codebuddy_settings(PermissionPolicy::Ask),
+            ("default", false)
+        );
+        assert_eq!(
+            codebuddy_settings(PermissionPolicy::Allow),
+            ("bypassPermissions", false)
+        );
+        assert_eq!(
+            codebuddy_settings(PermissionPolicy::Deny),
+            ("dontAsk", false)
+        );
+        assert_eq!(
+            codebuddy_settings(PermissionPolicy::Bypass),
+            ("default", true)
+        );
+    }
+}

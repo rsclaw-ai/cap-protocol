@@ -47,6 +47,9 @@ pub struct ClaudeCodeDriver {
     /// Populated by `shutdown` after the child reaps, or by the reader
     /// task with `Disconnected` if the channel dies before shutdown.
     exit_status: std::sync::Arc<std::sync::Mutex<Option<DriverExitStatus>>>,
+    prompt_after_ready: bool,
+    turn_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    is_rscode: bool,
 }
 
 impl ClaudeCodeDriver {
@@ -85,6 +88,7 @@ impl ClaudeCodeDriver {
             session_id: None,
             resume: None,
             replay_user_messages: true,
+            permission_mode: None,
             // Permission-bypass is opt-in. CAP spec §13.1 treats injected
             // input as privileged, and the driver has no way to route
             // claude's permission prompts back through CAP yet — so the
@@ -93,7 +97,11 @@ impl ClaudeCodeDriver {
             dangerously_skip_permissions: false,
             is_opencode: false,
             is_codex: false,
+            is_rscode: false,
             continue_last: false,
+            // Stream-json CLIs read their first stdin frame before emitting
+            // `system/init`; waiting for Ready here deadlocks the session.
+            prompt_after_ready: false,
         }
     }
 
@@ -116,16 +124,19 @@ impl ClaudeCodeDriver {
     /// ```
     pub fn opencode_builder(cwd: impl AsRef<Path>) -> ClaudeCodeDriverBuilder {
         ClaudeCodeDriverBuilder {
-            bin: Some("opencode".to_string()),
+            bin: None,
             cwd: cwd.as_ref().to_path_buf(),
             model: None,
             session_id: None,
             resume: None,
             replay_user_messages: false,
+            permission_mode: None,
             dangerously_skip_permissions: false,
             is_opencode: true,
             is_codex: false,
+            is_rscode: false,
             continue_last: false,
+            prompt_after_ready: false,
         }
     }
 
@@ -157,12 +168,13 @@ impl ClaudeCodeDriver {
     /// ```
     pub fn codex_builder(cwd: impl AsRef<Path>) -> ClaudeCodeDriverBuilder {
         ClaudeCodeDriverBuilder {
-            bin: Some("codex".to_string()),
+            bin: None,
             cwd: cwd.as_ref().to_path_buf(),
             model: None,
             session_id: None,
             resume: None,
             replay_user_messages: false,
+            permission_mode: None,
             // Driver caller decides whether to bypass codex sandbox
             // prompts via `.dangerously_skip_permissions(true)` —
             // maps to `--dangerously-bypass-approvals-and-sandbox`
@@ -171,7 +183,32 @@ impl ClaudeCodeDriver {
             dangerously_skip_permissions: false,
             is_opencode: false,
             is_codex: true,
+            is_rscode: false,
             continue_last: false,
+            prompt_after_ready: false,
+        }
+    }
+
+    /// Builder pre-configured for RSCode's stream-json protocol.
+    ///
+    /// RSCode uses a compact `{"type":"user","text":"..."}` input frame,
+    /// its own command-line flags, and an event envelope on stdout.
+    pub fn rscode_builder(cwd: impl AsRef<Path>) -> ClaudeCodeDriverBuilder {
+        ClaudeCodeDriverBuilder {
+            bin: None,
+            cwd: cwd.as_ref().to_path_buf(),
+            model: None,
+            session_id: None,
+            resume: None,
+            replay_user_messages: false,
+            permission_mode: None,
+            dangerously_skip_permissions: false,
+            is_opencode: false,
+            is_codex: false,
+            is_rscode: true,
+            continue_last: false,
+            // RSCode waits for its first stdin frame before emitting events.
+            prompt_after_ready: false,
         }
     }
 
@@ -183,27 +220,23 @@ impl ClaudeCodeDriver {
             session_id,
             resume,
             replay_user_messages,
+            permission_mode,
             dangerously_skip_permissions,
             is_opencode,
             is_codex,
+            is_rscode,
             continue_last,
+            prompt_after_ready,
         } = b;
 
         let bin = if is_opencode {
-            std::env::var("OPENCODE_BIN")
-                .ok()
-                .or(bin)
-                .unwrap_or_else(|| "opencode".to_string())
+            select_bin(bin, std::env::var("OPENCODE_BIN").ok(), "opencode")
         } else if is_codex {
-            std::env::var("CODEX_BIN")
-                .ok()
-                .or(bin)
-                .unwrap_or_else(|| "codex".to_string())
+            select_bin(bin, std::env::var("CODEX_BIN").ok(), "codex")
+        } else if is_rscode {
+            select_bin(bin, std::env::var("RSCODE_BIN").ok(), "rscode")
         } else {
-            std::env::var("CLAUDE_BIN")
-                .ok()
-                .or(bin)
-                .unwrap_or_else(|| "claude".to_string())
+            select_bin(bin, std::env::var("CLAUDE_BIN").ok(), "claude")
         };
 
         let mut cmd = Command::new(&bin);
@@ -243,9 +276,7 @@ impl ClaudeCodeDriver {
             //   codex exec [shared-flags] [resume <id>] [global flags]
             //              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
             //              order matters — emit shared flags first
-            cmd.arg("exec")
-                .arg("--sandbox")
-                .arg("workspace-write");
+            cmd.arg("exec").arg("--sandbox").arg("workspace-write");
             if dangerously_skip_permissions {
                 cmd.arg("--dangerously-bypass-approvals-and-sandbox");
             }
@@ -307,6 +338,16 @@ impl ClaudeCodeDriver {
             } else if continue_last {
                 cmd.arg("--continue");
             }
+        } else if is_rscode {
+            // RSCode uses a compact text input frame, its own flag names,
+            // and an event envelope on stdout.
+            let session = session_id.as_deref().or(resume.as_deref());
+            cmd.args(rscode_args(dangerously_skip_permissions, session))
+                .current_dir(&cwd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
         } else {
             // Claude Code: `claude -p --input-format=stream-json --output-format=stream-json`
             cmd.arg("-p")
@@ -330,6 +371,9 @@ impl ClaudeCodeDriver {
 
             if dangerously_skip_permissions {
                 cmd.arg("--dangerously-skip-permissions");
+            }
+            if let Some(mode) = &permission_mode {
+                cmd.arg("--permission-mode").arg(mode);
             }
             if replay_user_messages {
                 cmd.arg("--replay-user-messages");
@@ -377,6 +421,7 @@ impl ClaudeCodeDriver {
             cwd = %cwd.display(),
             is_opencode,
             is_codex,
+            is_rscode,
             session_mode = replay_user_messages,
             resume = ?resume,
             session_id = ?session_id,
@@ -398,6 +443,7 @@ impl ClaudeCodeDriver {
 
         let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let exit_status = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let turn_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         // Writer task: forward queued lines to the agent's stdin.
         // Both Claude Code and OpenCode receive prompts via stdin.
@@ -410,6 +456,8 @@ impl ClaudeCodeDriver {
             stdout,
             reader_tx,
             std::sync::Arc::clone(&exited),
+            std::sync::Arc::clone(&turn_pending),
+            is_opencode,
         ));
 
         // Stderr drain — log only, don't surface as events.
@@ -421,8 +469,33 @@ impl ClaudeCodeDriver {
             child: Some(child),
             exited,
             exit_status,
+            prompt_after_ready,
+            turn_pending,
+            is_rscode,
         })
     }
+}
+
+fn select_bin(explicit: Option<String>, env_override: Option<String>, default: &str) -> String {
+    explicit
+        .or(env_override)
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn rscode_args(auto_approve: bool, session: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "run".to_string(),
+        "--input-stream-json".to_string(),
+        "--output-stream-json".to_string(),
+    ];
+    if auto_approve {
+        args.push("--yes".to_string());
+    }
+    if let Some(session) = session {
+        args.push("--session".to_string());
+        args.push(session.to_string());
+    }
+    args
 }
 
 // ---------------------------------------------------------------------------
@@ -461,6 +534,7 @@ pub struct ClaudeCodeDriverBuilder {
     session_id: Option<String>,
     resume: Option<String>,
     replay_user_messages: bool,
+    permission_mode: Option<String>,
     dangerously_skip_permissions: bool,
     /// When true, use OpenCode CLI shape instead of Claude Code.
     is_opencode: bool,
@@ -468,12 +542,15 @@ pub struct ClaudeCodeDriverBuilder {
     /// stream-json --output-format stream-json`). Mutually exclusive
     /// with `is_opencode`; both false = claudecode/openclaude.
     is_codex: bool,
+    /// When true, use RSCode CLI flags and parse its event envelope.
+    is_rscode: bool,
     /// When true, pass the agent CLI's "resume last session" flag
     /// (claudecode `--continue`, opencode `--continue`, codex
     /// `exec resume --last`). Mutually exclusive with `resume` —
     /// `.resume(uuid)` clears this; `.continue_last(true)` clears
     /// `resume`.
     continue_last: bool,
+    prompt_after_ready: bool,
 }
 
 impl ClaudeCodeDriverBuilder {
@@ -514,6 +591,19 @@ impl ClaudeCodeDriverBuilder {
         if on {
             self.resume = None;
         }
+        self
+    }
+
+    /// Whether callers must wait for a Ready event before sending the first prompt.
+    /// Some compatible CLIs emit their init frame only after receiving input.
+    pub fn prompt_after_ready(mut self, on: bool) -> Self {
+        self.prompt_after_ready = on;
+        self
+    }
+
+    /// Set a Claude-compatible CLI permission mode.
+    pub fn permission_mode(mut self, mode: impl Into<String>) -> Self {
+        self.permission_mode = Some(mode.into());
         self
     }
 
@@ -558,12 +648,30 @@ impl ClaudeCodeDriverBuilder {
 impl Driver for ClaudeCodeDriver {
     async fn send(&mut self, frame: ClientFrame) -> Result<(), DriverError> {
         let tx = self.writer_tx.as_ref().ok_or(DriverError::AgentExited)?;
-        let line = encode_client_frame(&frame)?;
+        let starts_turn = matches!(
+            &frame,
+            ClientFrame::Prompt { .. }
+                | ClientFrame::AskUserAnswer { .. }
+                | ClientFrame::PermissionResponse { .. }
+        );
+        let line = if self.is_rscode {
+            encode_rscode_client_frame(&frame)?
+        } else {
+            encode_client_frame(&frame)?
+        };
         if line.is_empty() {
             return Ok(());
         }
+        if starts_turn {
+            self.turn_pending
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         trace!(line = %line, "→ agent");
-        tx.send(line).await.map_err(|_| DriverError::AgentExited)?;
+        if tx.send(line).await.is_err() {
+            self.turn_pending
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            return Err(DriverError::AgentExited);
+        }
         Ok(())
     }
 
@@ -604,7 +712,7 @@ impl Driver for ClaudeCodeDriver {
     }
 
     fn prompt_after_ready(&self) -> bool {
-        true
+        self.prompt_after_ready
     }
 }
 
@@ -630,11 +738,10 @@ async fn reader_task(
     stdout: tokio::process::ChildStdout,
     tx: mpsc::Sender<AgentEvent>,
     exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    turn_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    eof_is_success: bool,
 ) {
-    // Track whether a real terminal `Done` event has been emitted by
-    // a parsed stream frame (claudecode's `{"type":"result"}`).
-    //
-    // Why this matters: opencode's `opencode run --output-format
+    // OpenCode's `opencode run --output-format
     // stream-json` is one-shot per process and DOES NOT emit a
     // claudecode-style `result` terminator. It just streams its
     // assistant messages and exits. Without a synthetic Done on EOF,
@@ -643,11 +750,8 @@ async fn reader_task(
     // 5 minutes after completion before erroring. With this synth,
     // the EOF on opencode's stdout becomes the Done signal.
     //
-    // claudecode normally emits `result` before EOF, so this synth
-    // only fires in pathological cases there (driver killed, sudden
-    // exit) where it's still the right behaviour — the upstream
-    // CapLiveManager waiter would otherwise hang forever.
-    let mut done_emitted = false;
+    // Persistent agents must emit a result. Their EOF-before-result path
+    // surfaces an Error and lets the actor classify the turn as failed.
     // De-dupe the streamed-then-snapshotted assistant text. OpenCode's
     // `--output-format stream-json` (and claudecode with
     // `--include-partial-messages`) emit the assistant text TWICE: first
@@ -657,18 +761,30 @@ async fn reader_task(
     // Once we've streamed text for the current message, drop the matching
     // full-text snapshot; reset at each tool-call/message boundary and Done.
     let mut streamed_text = false;
+    // Track text already forwarded this turn. CodeBuddy may place the final
+    // answer only in `result.result`; compare content instead of suppressing
+    // the result merely because any earlier assistant text was seen.
+    let mut assistant_text = String::new();
     let mut lines = BufReader::new(stdout).lines();
     loop {
         match lines.next_line().await {
             Ok(Some(line)) => {
                 trace!(line = %line, "← agent");
-                for event in parse_stream_line(&line, false) {
+                let value = serde_json::from_str::<Value>(&line).ok();
+                let mut events = parse_stream_line(&line, false);
+                if let Some(event) = value
+                    .as_ref()
+                    .and_then(|frame| result_text_fallback(frame, &assistant_text))
+                {
+                    events.insert(0, event);
+                }
+                for event in events {
                     trace!(event = ?event, "parsed event");
                     let mut skip = false;
                     match &event {
-                        AgentEvent::TextChunk { msg_id, channel, .. }
-                            if *channel == TextChannel::Assistant =>
-                        {
+                        AgentEvent::TextChunk {
+                            msg_id, channel, ..
+                        } if *channel == TextChannel::Assistant => {
                             if msg_id.is_empty() {
                                 // A streamed token delta — arm the de-dupe.
                                 streamed_text = true;
@@ -681,12 +797,23 @@ async fn reader_task(
                         _ => {}
                     }
                     if matches!(event, AgentEvent::Done { .. }) {
-                        done_emitted = true;
+                        turn_pending.store(false, std::sync::atomic::Ordering::Relaxed);
                         streamed_text = false;
+                        assistant_text.clear();
+                    } else if matches!(event, AgentEvent::Error { .. }) {
+                        turn_pending.store(false, std::sync::atomic::Ordering::Relaxed);
                     }
                     if skip {
                         trace!("reader: dropping duplicate assistant snapshot");
                         continue;
+                    }
+                    if let AgentEvent::TextChunk {
+                        text,
+                        channel: TextChannel::Assistant,
+                        ..
+                    } = &event
+                    {
+                        assistant_text.push_str(text);
                     }
                     if tx.send(event).await.is_err() {
                         exited.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -696,31 +823,22 @@ async fn reader_task(
             }
             Ok(None) => {
                 debug!("reader: stdout EOF");
-                if !done_emitted {
-                    // Synthesise a Done so waiters don't hang. We
-                    // can't reconstruct full Usage from here, but
-                    // EndTurn + empty Usage is the right shape for
-                    // "session ended cleanly without a result frame"
-                    // (opencode's normal path) or "process disappeared
-                    // mid-turn" (claudecode crash).
-                    debug!("reader: synthesising Done on EOF (no result frame)");
-                    let _ = tx
-                        .send(AgentEvent::Done {
-                            stop_reason: StopReason::EndTurn,
-                            usage: Usage::default(),
-                        })
-                        .await;
+                let pending = turn_pending.load(std::sync::atomic::Ordering::Relaxed);
+                if let Some(event) = eof_event(pending, eof_is_success) {
+                    let _ = tx.send(event).await;
                 }
                 exited.store(true, std::sync::atomic::Ordering::Relaxed);
                 return;
             }
             Err(e) => {
                 warn!(error = %e, "reader: read error");
-                if !done_emitted {
+                if turn_pending.load(std::sync::atomic::Ordering::Relaxed) {
                     let _ = tx
-                        .send(AgentEvent::Done {
-                            stop_reason: StopReason::Error,
-                            usage: Usage::default(),
+                        .send(AgentEvent::Error {
+                            code: "stream_read_failed".into(),
+                            message: e.to_string(),
+                            retryable: false,
+                            details: None,
                         })
                         .await;
                 }
@@ -728,6 +846,24 @@ async fn reader_task(
                 return;
             }
         }
+    }
+}
+
+fn eof_event(turn_pending: bool, eof_is_success: bool) -> Option<AgentEvent> {
+    if !turn_pending {
+        None
+    } else if eof_is_success {
+        Some(AgentEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        })
+    } else {
+        Some(AgentEvent::Error {
+            code: "agent_eof_before_result".into(),
+            message: "agent stdout closed before a terminal result frame".into(),
+            retryable: false,
+            details: None,
+        })
     }
 }
 
@@ -815,6 +951,47 @@ fn encode_client_frame(frame: &ClientFrame) -> Result<String, DriverError> {
             message: "stream-json driver does not emit reverse RPC".into(),
         }),
     }
+}
+
+fn encode_rscode_client_frame(frame: &ClientFrame) -> Result<String, DriverError> {
+    let text = match frame {
+        ClientFrame::Prompt { content } => {
+            let mut text = String::new();
+            for part in content {
+                match part {
+                    Content::Text { text: part } => text.push_str(part),
+                    Content::Image { .. } => {
+                        return Err(DriverError::AgentError {
+                            code: "cap_rscode_image_unsupported".into(),
+                            message: "RSCode stream-json input accepts text prompts only".into(),
+                        });
+                    }
+                }
+            }
+            text
+        }
+        ClientFrame::AskUserAnswer { ask_id, value } => {
+            format!("[answer to {ask_id}]: {value}")
+        }
+        ClientFrame::PermissionResponse { req_id, decision } => {
+            format!("[permission {req_id}]: {decision:?}")
+        }
+        ClientFrame::SessionConfig(_) => return Ok(String::new()),
+        ClientFrame::Cancel { .. } => {
+            return Err(DriverError::AgentError {
+                code: "cap_cancel_unsupported".into(),
+                message: "stream-json binding has no in-band cancel; call Driver::shutdown".into(),
+            });
+        }
+        ClientFrame::ReverseRpcResult { .. } => {
+            return Err(DriverError::AgentError {
+                code: "cap_reverse_rpc_unsupported".into(),
+                message: "stream-json driver does not emit reverse RPC".into(),
+            });
+        }
+    };
+
+    Ok(json!({ "type": "user", "text": text }).to_string())
 }
 
 /// Parse one Claude stream-json frame into zero or more CAP events.
@@ -955,6 +1132,19 @@ fn parse_stream_frame(frame: &Value) -> Vec<AgentEvent> {
             events
         }
 
+        "event" => parse_rscode_event(frame),
+
+        "error" => vec![AgentEvent::Error {
+            code: "agent_error".into(),
+            message: frame
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("agent error")
+                .to_string(),
+            retryable: false,
+            details: Some(frame.clone()),
+        }],
+
         "result" => {
             let subtype = frame
                 .get("subtype")
@@ -1047,6 +1237,109 @@ fn parse_stream_frame(frame: &Value) -> Vec<AgentEvent> {
     }
 }
 
+fn parse_rscode_event(frame: &Value) -> Vec<AgentEvent> {
+    let Some(event) = frame.get("event").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let Some((kind, payload)) = event.iter().next() else {
+        return Vec::new();
+    };
+    let turn_id = payload
+        .get("turn")
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .unwrap_or_default();
+
+    match kind.as_str() {
+        "ThinkingDelta" => payload
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(|text| {
+                vec![AgentEvent::Thought {
+                    msg_id: turn_id,
+                    text: text.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        "AssistantDelta" => payload
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(|text| {
+                vec![AgentEvent::TextChunk {
+                    msg_id: String::new(),
+                    text: text.to_string(),
+                    channel: TextChannel::Assistant,
+                }]
+            })
+            .unwrap_or_default(),
+        "AssistantFinal" => {
+            let mut events = Vec::new();
+            for block in payload
+                .get("blocks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(block) = block.as_object() else {
+                    continue;
+                };
+                if let Some(text) = block
+                    .get("Text")
+                    .and_then(|v| v.get("text"))
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                {
+                    events.push(AgentEvent::TextChunk {
+                        msg_id: turn_id.clone(),
+                        text: text.to_string(),
+                        channel: TextChannel::Assistant,
+                    });
+                }
+            }
+            events
+        }
+        "ToolRequested" => vec![AgentEvent::ToolCallStart {
+            call_id: payload
+                .get("call")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            name: payload
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            input: payload.get("input").cloned().unwrap_or(Value::Null),
+        }],
+        "ToolCompleted" => vec![AgentEvent::ToolCallEnd {
+            call_id: payload
+                .get("call")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            output: payload
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            is_error: payload
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            duration: None,
+        }],
+        "Cancelled" => vec![AgentEvent::Done {
+            stop_reason: StopReason::Cancelled,
+            usage: Usage::default(),
+        }],
+        _ => Vec::new(),
+    }
+}
+
 fn extract_tool_result_output(block: &Value) -> String {
     match block.get("content") {
         Some(Value::String(s)) => s.clone(),
@@ -1059,8 +1352,49 @@ fn extract_tool_result_output(block: &Value) -> String {
     }
 }
 
+fn result_text_fallback(frame: &Value, assistant_text: &str) -> Option<AgentEvent> {
+    if frame.get("type").and_then(Value::as_str) != Some("result")
+        || frame
+            .get("subtype")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.starts_with("error"))
+    {
+        return None;
+    }
+    let text = frame
+        .get("result")
+        .or_else(|| frame.get("final_text"))
+        .and_then(Value::as_str)?;
+    if text.is_empty() {
+        return None;
+    }
+    let text = if text == assistant_text {
+        return None;
+    } else if !assistant_text.is_empty() {
+        text.strip_prefix(assistant_text).unwrap_or(text)
+    } else {
+        text
+    };
+    if text.is_empty() {
+        return None;
+    }
+    Some(AgentEvent::TextChunk {
+        msg_id: frame
+            .get("uuid")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        text: text.to_owned(),
+        channel: TextChannel::Assistant,
+    })
+}
+
 fn parse_usage(frame: &Value) -> Usage {
-    let u = frame.get("usage").cloned().unwrap_or(Value::Null);
+    let u = frame
+        .get("usage")
+        .or_else(|| frame.get("total_usage"))
+        .cloned()
+        .unwrap_or(Value::Null);
     let stop_reason = frame
         .get("subtype")
         .and_then(Value::as_str)
@@ -1118,6 +1452,14 @@ use crate::core::base64::encode as base64_encode;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn structured_stream_drivers_send_the_first_prompt_before_ready() {
+        assert!(!ClaudeCodeDriver::builder(".").prompt_after_ready);
+        assert!(!ClaudeCodeDriver::opencode_builder(".").prompt_after_ready);
+        assert!(!ClaudeCodeDriver::codex_builder(".").prompt_after_ready);
+        assert!(!ClaudeCodeDriver::rscode_builder(".").prompt_after_ready);
+    }
 
     #[test]
     fn parse_init_frame() {
@@ -1180,6 +1522,131 @@ mod tests {
     }
 
     #[test]
+    fn result_text_fallback_recovers_codebuddy_later_turns() {
+        let v: Value = serde_json::from_str(
+            r#"{"type":"result","subtype":"success","uuid":"r1","result":"later text"}"#,
+        )
+        .unwrap();
+        match result_text_fallback(&v, "earlier tool preface") {
+            Some(AgentEvent::TextChunk { text, .. }) => assert_eq!(text, "later text"),
+            other => panic!("wrong: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn result_text_fallback_deduplicates_exact_text_and_emits_suffix() {
+        let v: Value =
+            serde_json::from_str(r#"{"type":"result","subtype":"success","result":"hello world"}"#)
+                .unwrap();
+        assert!(result_text_fallback(&v, "hello world").is_none());
+        match result_text_fallback(&v, "hello ") {
+            Some(AgentEvent::TextChunk { text, .. }) => assert_eq!(text, "world"),
+            other => panic!("wrong: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_rscode_events_and_terminal_result() {
+        let thought: Value = serde_json::from_str(
+            r#"{"type":"event","event":{"ThinkingDelta":{"turn":3,"text":"hmm"}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            &parse_stream_frame(&thought)[0],
+            AgentEvent::Thought { text, .. } if text == "hmm"
+        ));
+
+        let delta: Value = serde_json::from_str(
+            r#"{"type":"event","event":{"AssistantDelta":{"turn":3,"text":"ready"}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            &parse_stream_frame(&delta)[0],
+            AgentEvent::TextChunk { text, .. } if text == "ready"
+        ));
+
+        let result: Value = serde_json::from_str(
+            r#"{"type":"result","final_text":"ready","total_usage":{"input_tokens":4,"output_tokens":2}}"#,
+        )
+        .unwrap();
+        match &parse_stream_frame(&result)[0] {
+            AgentEvent::Done { usage, .. } => {
+                assert_eq!(usage.input_tokens, 4);
+                assert_eq!(usage.output_tokens, 2);
+            }
+            other => panic!("wrong: {other:?}"),
+        }
+        assert!(result_text_fallback(&result, "ready").is_none());
+    }
+
+    #[test]
+    fn parses_rscode_tool_events() {
+        let requested: Value = serde_json::from_str(
+            r#"{"type":"event","event":{"ToolRequested":{"call":"t1","name":"Read","input":{"path":"x"}}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            &parse_stream_frame(&requested)[0],
+            AgentEvent::ToolCallStart { call_id, name, .. }
+                if call_id == "t1" && name == "Read"
+        ));
+
+        let completed: Value = serde_json::from_str(
+            r#"{"type":"event","event":{"ToolCompleted":{"call":"t1","content":"ok","is_error":false}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            &parse_stream_frame(&completed)[0],
+            AgentEvent::ToolCallEnd { output, is_error, .. }
+                if output == "ok" && !is_error
+        ));
+    }
+
+    #[test]
+    fn rscode_uses_its_native_stream_flags() {
+        assert_eq!(
+            rscode_args(true, Some("session-1")),
+            vec![
+                "run",
+                "--input-stream-json",
+                "--output-stream-json",
+                "--yes",
+                "--session",
+                "session-1",
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_binary_wins_over_generic_environment_override() {
+        assert_eq!(
+            select_bin(
+                Some("codebuddy".into()),
+                Some("claude-custom".into()),
+                "claude"
+            ),
+            "codebuddy"
+        );
+    }
+
+    #[test]
+    fn eof_is_only_success_for_one_shot_flavors() {
+        assert!(eof_event(false, false).is_none());
+        assert!(matches!(
+            eof_event(true, true),
+            Some(AgentEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                ..
+            })
+        ));
+        assert!(matches!(
+            eof_event(true, false),
+            Some(AgentEvent::Error { ref code, .. })
+                if code == "agent_eof_before_result"
+        ));
+    }
+
+    #[test]
     fn encode_simple_prompt() {
         let frame = ClientFrame::Prompt {
             content: vec![Content::text("hi")],
@@ -1188,6 +1655,17 @@ mod tests {
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["type"], "user");
         assert_eq!(v["message"]["content"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn encode_rscode_prompt_uses_native_text_field() {
+        let frame = ClientFrame::Prompt {
+            content: vec![Content::text("hello "), Content::text("rscode")],
+        };
+        let line = encode_rscode_client_frame(&frame).unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v, json!({ "type": "user", "text": "hello rscode" }));
+        assert!(v.get("message").is_none());
     }
 
     #[test]

@@ -72,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
             ev = driver.next_event() => {
                 match ev {
                     Some(AgentEvent::Ready { session_id, .. }) => {
+                        let session_id = session_id.as_deref().unwrap_or("<none>");
                         eprintln!("● ready  ({session_id})");
                         ready = true;
                         if let Some((line, expected)) = probe_iter.next() {

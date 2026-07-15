@@ -16,8 +16,8 @@ use crate::config::{DriverKind, FleetSpec, PermissionPolicy, SessionId};
 use crate::event::{OrchestratorControl, OrchestratorEvent};
 use crate::factory::DriverFactory;
 use crate::registry::SessionRegistry;
-use crate::session::SessionSpawnConfig;
 use crate::routing::{RouteDecision, RoutingContext, RoutingStrategy, StaticRouting};
+use crate::session::SessionSpawnConfig;
 use crate::worktree::WorktreeManager;
 
 /// A handle to a running fleet: query the audit log, answer asks, cancel.

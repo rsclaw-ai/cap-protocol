@@ -1,8 +1,0 @@
-.rscode/
-.git/
-target/
-node_modules/
-.venv/
-__pycache__/
-.mypy_cache/
-.pytest_cache/

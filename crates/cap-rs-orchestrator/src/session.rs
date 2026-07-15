@@ -242,7 +242,12 @@ async fn pump_turn(
 
         let ev = match input {
             PumpInput::Cancelled => {
-                let _ = driver.send(ClientFrame::Cancel { scope: CancelScope::Session, reason: Some("orchestrator_cancel".into()) }).await;
+                let _ = driver
+                    .send(ClientFrame::Cancel {
+                        scope: CancelScope::Session,
+                        reason: Some("orchestrator_cancel".into()),
+                    })
+                    .await;
                 let _ = driver.shutdown().await;
                 return;
             }
@@ -496,7 +501,15 @@ mod tests {
         bus: mpsc::Sender<OrchestratorEvent>,
         cancel: CancellationToken,
     ) -> SessionHandle {
-        spawn_session(id, driver, policy, cwd, bus, cancel, SessionSpawnConfig::default())
+        spawn_session(
+            id,
+            driver,
+            policy,
+            cwd,
+            bus,
+            cancel,
+            SessionSpawnConfig::default(),
+        )
     }
     use crate::event::OrchestratorEvent;
     use crate::testing::StubDriver;

@@ -62,7 +62,10 @@ async fn main() -> anyhow::Result<()> {
     while let Some(event) = driver.next_event().await {
         match event {
             AgentEvent::Ready { session_id, .. } => {
-                println!("● ready  thread={}", session_id);
+                println!(
+                    "● ready  thread={}",
+                    session_id.as_deref().unwrap_or("<none>")
+                );
             }
             AgentEvent::TextChunk { text, channel, .. } => {
                 if !last_was_text {

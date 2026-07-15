@@ -107,9 +107,25 @@ impl SessionRegistry {
             }
         };
         let handle = if chat_mode {
-            spawn_chat_session(id.clone(), driver, policy, cwd, bus.clone(), cancel.clone(), spawn_cfg)
+            spawn_chat_session(
+                id.clone(),
+                driver,
+                policy,
+                cwd,
+                bus.clone(),
+                cancel.clone(),
+                spawn_cfg,
+            )
         } else {
-            spawn_session(id.clone(), driver, policy, cwd, bus.clone(), cancel.clone(), spawn_cfg)
+            spawn_session(
+                id.clone(),
+                driver,
+                policy,
+                cwd,
+                bus.clone(),
+                cancel.clone(),
+                spawn_cfg,
+            )
         };
         self.sessions.insert(id, handle);
         Ok(())

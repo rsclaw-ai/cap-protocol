@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 println!(
                     "● ready  session={} model={}",
-                    short(&session_id, 8),
+                    short(session_id.as_deref().unwrap_or("<none>"), 8),
                     model.as_deref().unwrap_or("?")
                 );
             }

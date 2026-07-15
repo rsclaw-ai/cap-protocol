@@ -54,3 +54,5 @@ coverage/
 .tmp/
 .scratch/
 .claude/
+.rscode/
+.cap/

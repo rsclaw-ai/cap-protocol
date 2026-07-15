@@ -93,10 +93,10 @@ async fn main() -> anyhow::Result<()> {
             event = driver.next_event() => {
                 match event {
                     Some(AgentEvent::Ready { session_id: sid, model, .. }) => {
-                        session_id = sid.clone();
                         eprintln!("\n● ready session={} model={}",
-                            short(&sid, 8),
+                            short(sid.as_deref().unwrap_or("<none>"), 8),
                             model.as_deref().unwrap_or("?"));
+                        session_id = sid.unwrap_or_default();
                     }
                     Some(AgentEvent::TextChunk { msg_id, text, channel }) => {
                         if waiting_for_prompt {

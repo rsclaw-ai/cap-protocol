@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-15
+
 ### Added
+
+- **RSCode and CodeBuddy drivers** — both are available through the fleet
+  configuration and CAP agent manifests. RSCode uses its native persistent
+  stream-JSON protocol; CodeBuddy maps CAP permission policies to its CLI.
+- **Native fallback for Codex and OpenCode** — when an installed CLI does not
+  advertise stream-JSON support, CAP uses Codex MCP or OpenCode ACP with the
+  configured binary instead of launching a failing stream-JSON process.
 
 - **`cap-rs-orchestrator`** — headless multi-agent orchestration engine.
   Runs N collaborating CLI agents in one process from a declarative
@@ -95,6 +104,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Structured stream-JSON agents no longer wait for a PTY-ready prompt before
+  receiving their first request. Persistent stream EOF is now reported as an
+  error rather than a successful terminal event.
+
 - `pty.rs` `manual_pattern_char_comparison` clippy warning.
 - `stream_json.rs` `manual_div_ceil` clippy warning.
 - `codex.rs` unused `Content` import.
@@ -110,5 +123,6 @@ First release with real code. Three drivers shipped:
 Plus the CAP v1 draft spec, coding profile draft, and the
 `cap-protocol.org` website.
 
-[Unreleased]: https://github.com/rsclaw-ai/cap-protocol/compare/v0.0.1...HEAD
+[Unreleased]: https://github.com/rsclaw-ai/cap-protocol/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/rsclaw-ai/cap-protocol/compare/v0.1.0...v0.2.0
 [0.0.1]: https://github.com/rsclaw-ai/cap-protocol/releases/tag/v0.0.1
