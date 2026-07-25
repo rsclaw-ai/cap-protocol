@@ -12,6 +12,7 @@
 //! openclaude and other Anthropic-SDK-compatible CLIs should also work
 //! with `ClaudeCodeDriver::builder(cwd).bin("openclaude").spawn()`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -102,6 +103,8 @@ impl ClaudeCodeDriver {
             // Stream-json CLIs read their first stdin frame before emitting
             // `system/init`; waiting for Ready here deadlocks the session.
             prompt_after_ready: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
         }
     }
 
@@ -137,6 +140,8 @@ impl ClaudeCodeDriver {
             is_rscode: false,
             continue_last: false,
             prompt_after_ready: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
         }
     }
 
@@ -186,6 +191,8 @@ impl ClaudeCodeDriver {
             is_rscode: false,
             continue_last: false,
             prompt_after_ready: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
         }
     }
 
@@ -209,6 +216,8 @@ impl ClaudeCodeDriver {
             continue_last: false,
             // RSCode waits for its first stdin frame before emitting events.
             prompt_after_ready: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
         }
     }
 
@@ -227,6 +236,8 @@ impl ClaudeCodeDriver {
             is_rscode,
             continue_last,
             prompt_after_ready,
+            extra_args,
+            env,
         } = b;
 
         let bin = if is_opencode {
@@ -394,6 +405,8 @@ impl ClaudeCodeDriver {
             }
         }
 
+        cmd.args(extra_args).envs(env);
+
         // Strip parent-session env vars so claude doesn't refuse to launch
         // when cap-rs itself is running inside another Claude Code session.
         // See "Claude Code cannot be launched inside another Claude Code session"
@@ -551,12 +564,33 @@ pub struct ClaudeCodeDriverBuilder {
     /// `resume`.
     continue_last: bool,
     prompt_after_ready: bool,
+    /// Arguments appended after the driver's protocol-specific arguments.
+    extra_args: Vec<String>,
+    /// Environment variables applied only to the child agent process.
+    env: HashMap<String, String>,
 }
 
 impl ClaudeCodeDriverBuilder {
     /// Override the binary used (default: `claude` on PATH, or `$CLAUDE_BIN`).
     pub fn bin(mut self, bin: impl Into<String>) -> Self {
         self.bin = Some(bin.into());
+        self
+    }
+
+    /// Append agent-specific arguments after the driver's required protocol
+    /// flags. Callers must not repeat flags managed by the selected driver.
+    pub fn extra_args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.extra_args = args.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Set environment variables for the spawned agent process only.
+    pub fn envs(mut self, env: HashMap<String, String>) -> Self {
+        self.env = env;
         self
     }
 
@@ -1626,6 +1660,21 @@ mod tests {
                 "claude"
             ),
             "codebuddy"
+        );
+    }
+
+    #[test]
+    fn builder_preserves_agent_specific_args_and_env() {
+        let mut env = HashMap::new();
+        env.insert("QODER_PROFILE".to_string(), "production".to_string());
+        let builder = ClaudeCodeDriver::builder(".")
+            .extra_args(["--qoder-feature=enabled"])
+            .envs(env);
+
+        assert_eq!(builder.extra_args, vec!["--qoder-feature=enabled"]);
+        assert_eq!(
+            builder.env.get("QODER_PROFILE"),
+            Some(&"production".to_string())
         );
     }
 
