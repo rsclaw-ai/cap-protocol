@@ -70,7 +70,7 @@ libc         = { version = "0.2",                        optional = true }
 
 # gRPC specific.
 tonic        = { version = "0.12",                       optional = true }
-prost        = { version = "0.13",                       optional = true }
+prost        = { version = "0.14",                       optional = true }
 
 [build-dependencies]
 tonic-build = { version = "0.12", optional = true }
