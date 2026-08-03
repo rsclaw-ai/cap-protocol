@@ -328,13 +328,12 @@ async fn pump_turn(
                 .await;
 
                 let decision = match policy {
-                    PermissionPolicy::Allow | PermissionPolicy::Bypass
-                        if risk_level != cap_rs::core::RiskLevel::High =>
-                    {
+                    PermissionPolicy::Bypass => PermissionDecision::AllowOnce,
+                    PermissionPolicy::Allow if risk_level != cap_rs::core::RiskLevel::High => {
                         PermissionDecision::AllowOnce
                     }
                     PermissionPolicy::Deny => PermissionDecision::Deny,
-                    PermissionPolicy::Ask | PermissionPolicy::Allow | PermissionPolicy::Bypass => {
+                    PermissionPolicy::Ask | PermissionPolicy::Allow => {
                         bus_send(
                             bus,
                             OrchestratorEvent::Ask {
@@ -696,6 +695,36 @@ mod tests {
             }
         }
         assert!(!saw_ask, "Allow policy must not surface an Ask");
+    }
+
+    #[tokio::test]
+    async fn bypass_auto_approves_high_risk_permission() {
+        let driver = Box::new(
+            StubDriver::new("a")
+                .permission("Bash", RiskLevel::High)
+                .done(StopReason::EndTurn),
+        );
+        let (bus_tx, mut bus_rx) = mpsc::channel(64);
+        let token = CancellationToken::new();
+        let handle = spawn_test_session(
+            "a".into(),
+            driver,
+            PermissionPolicy::Bypass,
+            test_cwd(),
+            bus_tx,
+            token,
+        );
+        handle.inbox.send(prompt("go")).await.unwrap();
+
+        let mut saw_ask = false;
+        while let Some(ev) = bus_rx.recv().await {
+            match ev {
+                OrchestratorEvent::Ask { .. } => saw_ask = true,
+                OrchestratorEvent::SessionDone { .. } => break,
+                _ => {}
+            }
+        }
+        assert!(!saw_ask, "Bypass policy must auto-approve every risk level");
     }
 
     #[tokio::test]

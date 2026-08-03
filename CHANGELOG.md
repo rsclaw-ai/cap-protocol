@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-04
+
+### Added
+
+- **Unified permission-policy mapping per agent** — the orchestrator now
+  translates the CAP `PermissionPolicy` (`ask` / `allow` / `deny` / `bypass`)
+  into each agent's native flags, so policy semantics are identical no matter
+  which driver backs a session:
+  - Claude / OpenClaude: `--permission-mode manual | acceptEdits | dontAsk`,
+    `--dangerously-skip-permissions` for `bypass`.
+  - Codex (stream-json and MCP fallback): `--ask-for-approval
+    on-request | never` + `--sandbox workspace-write | read-only |
+    danger-full-access`.
+  - OpenCode / RSCode: auto-approve switches for `allow` / `bypass`.
+  - CodeBuddy / Qoder: their own `--permission-mode` values.
+- **PTY fallback honors the policy** — known agents (`claude`,
+  `openclaude`, `codex`, `opencode`, `qodercli`, `codebuddy`, `cbc`,
+  `rscode`) receive their native permission flags when spawned via
+  `pty:<cmd>`; unknown binaries are left untouched.
+- **`bypass` now auto-approves every risk level** at the orchestrator,
+  including `RiskLevel::High` — previously it degraded to a prompt for
+  high-risk requests, matching `allow` instead of opening everything.
+- **`CodexDriverBuilder::codex_permissions(approval, sandbox)`** — direct
+  control of Codex CLI approval policy and sandbox from cap-rs.
+
+### Fixed
+
+- `CLAUDE_CODE_OAUTH_TOKEN` is no longer stripped from the child
+  environment (stream-json driver). Authentication credentials are a
+  session-independent property and must be inherited; only parent-session
+  metadata (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, …) is removed.
+- OpenCode driver now receives the fleet policy — `bypass` previously had
+  no effect when routed through `opencode run --output-format stream-json`.
+
+## [0.2.1] - 2026-07-26
+
+### Changed
+
+- `stream-json` driver exposed agent launch options (`bin`, `envs`,
+  `extra_args`, ...) via `ClaudeCodeDriverBuilder`.
+
 ## [0.2.0] - 2026-07-15
 
 ### Added

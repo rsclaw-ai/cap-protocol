@@ -90,6 +90,8 @@ impl ClaudeCodeDriver {
             resume: None,
             replay_user_messages: true,
             permission_mode: None,
+            codex_approval_policy: None,
+            codex_sandbox: "workspace-write".into(),
             // Permission-bypass is opt-in. CAP spec §13.1 treats injected
             // input as privileged, and the driver has no way to route
             // claude's permission prompts back through CAP yet — so the
@@ -134,6 +136,8 @@ impl ClaudeCodeDriver {
             resume: None,
             replay_user_messages: false,
             permission_mode: None,
+            codex_approval_policy: None,
+            codex_sandbox: "workspace-write".into(),
             dangerously_skip_permissions: false,
             is_opencode: true,
             is_codex: false,
@@ -180,6 +184,8 @@ impl ClaudeCodeDriver {
             resume: None,
             replay_user_messages: false,
             permission_mode: None,
+            codex_approval_policy: None,
+            codex_sandbox: "workspace-write".into(),
             // Driver caller decides whether to bypass codex sandbox
             // prompts via `.dangerously_skip_permissions(true)` —
             // maps to `--dangerously-bypass-approvals-and-sandbox`
@@ -209,6 +215,8 @@ impl ClaudeCodeDriver {
             resume: None,
             replay_user_messages: false,
             permission_mode: None,
+            codex_approval_policy: None,
+            codex_sandbox: "workspace-write".into(),
             dangerously_skip_permissions: false,
             is_opencode: false,
             is_codex: false,
@@ -230,6 +238,8 @@ impl ClaudeCodeDriver {
             resume,
             replay_user_messages,
             permission_mode,
+            codex_approval_policy,
+            codex_sandbox,
             dangerously_skip_permissions,
             is_opencode,
             is_codex,
@@ -287,7 +297,10 @@ impl ClaudeCodeDriver {
             //   codex exec [shared-flags] [resume <id>] [global flags]
             //              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
             //              order matters — emit shared flags first
-            cmd.arg("exec").arg("--sandbox").arg("workspace-write");
+            cmd.arg("exec").arg("--sandbox").arg(&codex_sandbox);
+            if let Some(policy) = &codex_approval_policy {
+                cmd.arg("--ask-for-approval").arg(policy);
+            }
             if dangerously_skip_permissions {
                 cmd.arg("--dangerously-bypass-approvals-and-sandbox");
             }
@@ -336,6 +349,9 @@ impl ClaudeCodeDriver {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
+            if dangerously_skip_permissions {
+                cmd.arg("--dangerously-skip-permissions");
+            }
             if let Some(m) = &model {
                 cmd.arg("--model").arg(m);
             }
@@ -407,15 +423,15 @@ impl ClaudeCodeDriver {
 
         cmd.args(extra_args).envs(env);
 
-        // Strip parent-session env vars so claude doesn't refuse to launch
+        // Strip parent-session metadata so claude doesn't refuse to launch
         // when cap-rs itself is running inside another Claude Code session.
         // See "Claude Code cannot be launched inside another Claude Code session"
-        // — claude bails when CLAUDECODE is set in its environment.
+        // — claude bails when CLAUDECODE is set in its environment. Authentication
+        // credentials such as CLAUDE_CODE_OAUTH_TOKEN must remain inherited.
         for var in [
             "CLAUDECODE",
             "CLAUDE_CODE_ENTRYPOINT",
             "CLAUDE_CODE_SSE_PORT",
-            "CLAUDE_CODE_OAUTH_TOKEN",
             "CLAUDE_CODE_SESSION_ID",
             "CLAUDE_SESSION_ID",
         ] {
@@ -548,6 +564,8 @@ pub struct ClaudeCodeDriverBuilder {
     resume: Option<String>,
     replay_user_messages: bool,
     permission_mode: Option<String>,
+    codex_approval_policy: Option<String>,
+    codex_sandbox: String,
     dangerously_skip_permissions: bool,
     /// When true, use OpenCode CLI shape instead of Claude Code.
     is_opencode: bool,
@@ -638,6 +656,19 @@ impl ClaudeCodeDriverBuilder {
     /// Set a Claude-compatible CLI permission mode.
     pub fn permission_mode(mut self, mode: impl Into<String>) -> Self {
         self.permission_mode = Some(mode.into());
+        self
+    }
+
+    /// Set Codex's native approval and sandbox policies.
+    ///
+    /// These settings are only used by [`ClaudeCodeDriver::codex_builder`].
+    pub fn codex_permissions(
+        mut self,
+        approval_policy: impl Into<String>,
+        sandbox: impl Into<String>,
+    ) -> Self {
+        self.codex_approval_policy = Some(approval_policy.into());
+        self.codex_sandbox = sandbox.into();
         self
     }
 

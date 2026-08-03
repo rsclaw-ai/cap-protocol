@@ -53,21 +53,90 @@ fn codex_mcp_bin(configured: Option<String>) -> String {
     configured.unwrap_or_else(|| "codex".into())
 }
 
-fn codex_mcp_settings(policy: PermissionPolicy) -> (&'static str, &'static str) {
+fn claude_settings(policy: PermissionPolicy) -> (Option<&'static str>, bool) {
     match policy {
-        PermissionPolicy::Ask => ("on-request", "workspace-write"),
-        PermissionPolicy::Allow => ("never", "workspace-write"),
-        PermissionPolicy::Deny => ("never", "read-only"),
-        PermissionPolicy::Bypass => ("never", "danger-full-access"),
+        PermissionPolicy::Ask => (Some("manual"), false),
+        PermissionPolicy::Allow => (Some("acceptEdits"), false),
+        PermissionPolicy::Deny => (Some("dontAsk"), false),
+        PermissionPolicy::Bypass => (None, true),
     }
 }
 
-fn codebuddy_settings(policy: PermissionPolicy) -> (&'static str, bool) {
+fn qoder_settings(policy: PermissionPolicy) -> (Option<&'static str>, bool) {
     match policy {
-        PermissionPolicy::Ask => ("default", false),
-        PermissionPolicy::Allow => ("bypassPermissions", false),
-        PermissionPolicy::Deny => ("dontAsk", false),
-        PermissionPolicy::Bypass => ("default", true),
+        PermissionPolicy::Ask => (Some("default"), false),
+        PermissionPolicy::Allow => (Some("accept_edits"), false),
+        PermissionPolicy::Deny => (Some("dont_ask"), false),
+        PermissionPolicy::Bypass => (None, true),
+    }
+}
+
+fn codex_settings(policy: PermissionPolicy) -> (&'static str, &'static str, bool) {
+    match policy {
+        PermissionPolicy::Ask => ("on-request", "workspace-write", false),
+        PermissionPolicy::Allow => ("never", "workspace-write", false),
+        PermissionPolicy::Deny => ("never", "read-only", false),
+        PermissionPolicy::Bypass => ("never", "danger-full-access", true),
+    }
+}
+
+fn codebuddy_settings(policy: PermissionPolicy) -> (Option<&'static str>, bool) {
+    match policy {
+        PermissionPolicy::Ask => (Some("default"), false),
+        PermissionPolicy::Allow => (Some("acceptEdits"), false),
+        PermissionPolicy::Deny => (Some("dontAsk"), false),
+        PermissionPolicy::Bypass => (None, true),
+    }
+}
+
+fn auto_approve(policy: PermissionPolicy) -> bool {
+    matches!(policy, PermissionPolicy::Allow | PermissionPolicy::Bypass)
+}
+
+fn pty_permission_args(cmd: &str, policy: PermissionPolicy) -> Vec<&'static str> {
+    match cmd {
+        "claude" | "openclaude" => match claude_settings(policy) {
+            (Some(mode), false) => vec!["--permission-mode", mode],
+            (None, true) => vec!["--dangerously-skip-permissions"],
+            _ => Vec::new(),
+        },
+        "codex" => match policy {
+            PermissionPolicy::Ask => vec![
+                "--ask-for-approval",
+                "on-request",
+                "--sandbox",
+                "workspace-write",
+            ],
+            PermissionPolicy::Allow => vec![
+                "--ask-for-approval",
+                "never",
+                "--sandbox",
+                "workspace-write",
+            ],
+            PermissionPolicy::Deny => {
+                vec!["--ask-for-approval", "never", "--sandbox", "read-only"]
+            }
+            PermissionPolicy::Bypass => {
+                vec!["--dangerously-bypass-approvals-and-sandbox"]
+            }
+        },
+        "opencode" => auto_approve(policy)
+            .then_some(vec!["--dangerously-skip-permissions"])
+            .unwrap_or_default(),
+        "qodercli" => match qoder_settings(policy) {
+            (Some(mode), false) => vec!["--permission-mode", mode],
+            (None, true) => vec!["--dangerously-skip-permissions"],
+            _ => Vec::new(),
+        },
+        "codebuddy" | "cbc" => match codebuddy_settings(policy) {
+            (Some(mode), false) => vec!["--permission-mode", mode],
+            (None, true) => vec!["--dangerously-skip-permissions"],
+            _ => Vec::new(),
+        },
+        "rscode" => auto_approve(policy)
+            .then_some(vec!["--yes"])
+            .unwrap_or_default(),
+        _ => Vec::new(),
     }
 }
 
@@ -76,7 +145,7 @@ fn codex_mcp_builder(
     policy: PermissionPolicy,
     bin: String,
 ) -> cap_rs::driver::codex_mcp::CodexMcpBuilder {
-    let (approval, sandbox) = codex_mcp_settings(policy);
+    let (approval, sandbox, _) = codex_settings(policy);
     CodexMcpDriver::builder(cwd)
         .bin(bin)
         .approval_policy(approval)
@@ -132,7 +201,7 @@ async fn build_codex_driver(
     stream_bin: String,
     mcp_bin: String,
 ) -> Result<Box<dyn Driver>, OrchestratorError> {
-    let bypass = policy == PermissionPolicy::Bypass;
+    let (approval, sandbox, bypass) = codex_settings(policy);
     if !probe_stream_json_support(&stream_bin, &["exec"], "stream-json").await {
         info!(bin = %stream_bin, mcp_bin = %mcp_bin, "codex: stream-json unsupported, using codex-mcp");
         let driver = codex_mcp_builder(cwd, policy, mcp_bin).spawn().await?;
@@ -141,6 +210,7 @@ async fn build_codex_driver(
 
     match ClaudeCodeDriver::codex_builder(cwd)
         .bin(stream_bin.clone())
+        .codex_permissions(approval, sandbox)
         .dangerously_skip_permissions(bypass)
         .spawn()
         .await
@@ -179,6 +249,7 @@ async fn spawn_opencode_acp(cwd: &Path, bin: String) -> Result<Box<dyn Driver>, 
 
 async fn build_opencode_driver(
     cwd: &Path,
+    policy: PermissionPolicy,
     bin: String,
 ) -> Result<Box<dyn Driver>, OrchestratorError> {
     if !probe_stream_json_support(&bin, &["run"], "stream-json").await {
@@ -188,6 +259,7 @@ async fn build_opencode_driver(
 
     match ClaudeCodeDriver::opencode_builder(cwd)
         .bin(bin.clone())
+        .dangerously_skip_permissions(auto_approve(policy))
         .spawn()
         .await
     {
@@ -227,29 +299,32 @@ impl DriverFactory for RealDriverFactory {
         cwd: &Path,
         policy: PermissionPolicy,
     ) -> Result<Box<dyn Driver>, OrchestratorError> {
-        let bypass = policy == PermissionPolicy::Bypass;
         match kind {
             DriverKind::Claude => {
-                let driver = ClaudeCodeDriver::builder(cwd)
-                    .dangerously_skip_permissions(bypass)
-                    .spawn()
-                    .await?;
-                Ok(Box::new(driver))
+                let (mode, bypass) = claude_settings(policy);
+                let mut builder =
+                    ClaudeCodeDriver::builder(cwd).dangerously_skip_permissions(bypass);
+                if let Some(mode) = mode {
+                    builder = builder.permission_mode(mode);
+                }
+                Ok(Box::new(builder.spawn().await?))
             }
             DriverKind::OpenClaude => {
-                let driver = ClaudeCodeDriver::builder(cwd)
+                let (mode, bypass) = claude_settings(policy);
+                let mut builder = ClaudeCodeDriver::builder(cwd)
                     .bin("openclaude")
-                    .dangerously_skip_permissions(bypass)
-                    .spawn()
-                    .await?;
-                Ok(Box::new(driver))
+                    .dangerously_skip_permissions(bypass);
+                if let Some(mode) = mode {
+                    builder = builder.permission_mode(mode);
+                }
+                Ok(Box::new(builder.spawn().await?))
             }
             // OpenCode falls back to ACP when its installed CLI does not
             // advertise stream-json. Keep the early-exit check for forks
             // whose advertised capability disagrees with their parser.
             DriverKind::OpenCode => {
                 let bin = std::env::var("OPENCODE_BIN").unwrap_or_else(|_| "opencode".into());
-                build_opencode_driver(cwd, bin).await
+                build_opencode_driver(cwd, policy, bin).await
             }
             // codex: try stream-json optimistically, fall back to codex-mcp.
             // Fork versions add `--input-format stream-json` to `codex exec`;
@@ -270,10 +345,7 @@ impl DriverFactory for RealDriverFactory {
                     // RSCode's stream input owns stdin, so Allow/Bypass must
                     // use its non-interactive approval switch. Ask/Deny remain
                     // fail-closed when a tool needs approval.
-                    .dangerously_skip_permissions(matches!(
-                        policy,
-                        PermissionPolicy::Allow | PermissionPolicy::Bypass
-                    ))
+                    .dangerously_skip_permissions(auto_approve(policy))
                     .spawn()
                     .await?;
                 Ok(Box::new(driver))
@@ -281,22 +353,24 @@ impl DriverFactory for RealDriverFactory {
             DriverKind::Codebuddy => {
                 let bin = std::env::var("CODEBUDDY_BIN").unwrap_or_else(|_| "codebuddy".into());
                 let (permission_mode, skip_permissions) = codebuddy_settings(policy);
-                let driver = ClaudeCodeDriver::builder(cwd)
+                let mut builder = ClaudeCodeDriver::builder(cwd)
                     .bin(bin)
                     .prompt_after_ready(false)
-                    .permission_mode(permission_mode)
-                    .dangerously_skip_permissions(skip_permissions)
-                    .spawn()
-                    .await?;
-                Ok(Box::new(driver))
+                    .dangerously_skip_permissions(skip_permissions);
+                if let Some(mode) = permission_mode {
+                    builder = builder.permission_mode(mode);
+                }
+                Ok(Box::new(builder.spawn().await?))
             }
             DriverKind::Qoder => {
-                let driver = ClaudeCodeDriver::builder(cwd)
+                let (mode, bypass) = qoder_settings(policy);
+                let mut builder = ClaudeCodeDriver::builder(cwd)
                     .bin("qodercli")
-                    .dangerously_skip_permissions(bypass)
-                    .spawn()
-                    .await?;
-                Ok(Box::new(driver))
+                    .dangerously_skip_permissions(bypass);
+                if let Some(mode) = mode {
+                    builder = builder.permission_mode(mode);
+                }
+                Ok(Box::new(builder.spawn().await?))
             }
             DriverKind::A2a(endpoint) => {
                 let driver = A2aDriver::connect(endpoint.clone()).await?;
@@ -322,8 +396,8 @@ impl DriverFactory for RealDriverFactory {
             }
             DriverKind::Pty(cmd) => {
                 let mut builder = PtyDriver::builder(cmd.clone()).cwd(cwd);
-                if cmd.as_str() == "codex" && bypass {
-                    builder = builder.arg("--dangerously-bypass-approvals-and-sandbox");
+                for arg in pty_permission_args(cmd, policy) {
+                    builder = builder.arg(arg);
                 }
                 let parser = match cmd.as_str() {
                     "codex" => TuiParser::codex(),
@@ -416,9 +490,13 @@ mod tests {
             "#!/bin/sh\ncase \" $* \" in *\" run --help \"*) echo 'usage: fake'; exit 0;; esac\nIFS= read -r line || exit 1\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'\nIFS= read -r line || exit 1\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"fake-session\"}}'\nwhile IFS= read -r line; do :; done\n",
         );
 
-        let mut driver = build_opencode_driver(dir.path(), bin.display().to_string())
-            .await
-            .expect("fallback ACP driver should complete its handshake");
+        let mut driver = build_opencode_driver(
+            dir.path(),
+            PermissionPolicy::Deny,
+            bin.display().to_string(),
+        )
+        .await
+        .expect("fallback ACP driver should complete its handshake");
 
         assert!(matches!(
             driver.next_event().await,
@@ -428,37 +506,79 @@ mod tests {
     }
 
     #[test]
-    fn codex_mcp_permissions_fail_closed() {
+    fn native_permission_mappings_cover_every_policy() {
         assert_eq!(
-            codex_mcp_settings(PermissionPolicy::Ask),
-            ("on-request", "workspace-write")
+            claude_settings(PermissionPolicy::Ask),
+            (Some("manual"), false)
         );
         assert_eq!(
-            codex_mcp_settings(PermissionPolicy::Deny),
-            ("never", "read-only")
+            claude_settings(PermissionPolicy::Allow),
+            (Some("acceptEdits"), false)
         );
         assert_eq!(
-            codex_mcp_settings(PermissionPolicy::Bypass),
-            ("never", "danger-full-access")
+            claude_settings(PermissionPolicy::Deny),
+            (Some("dontAsk"), false)
         );
-    }
-    #[test]
-    fn codebuddy_permissions_cover_every_policy() {
+        assert_eq!(claude_settings(PermissionPolicy::Bypass), (None, true));
+
+        assert_eq!(
+            qoder_settings(PermissionPolicy::Allow),
+            (Some("accept_edits"), false)
+        );
+        assert_eq!(
+            qoder_settings(PermissionPolicy::Deny),
+            (Some("dont_ask"), false)
+        );
+        assert_eq!(qoder_settings(PermissionPolicy::Bypass), (None, true));
+
+        assert_eq!(
+            codex_settings(PermissionPolicy::Ask),
+            ("on-request", "workspace-write", false)
+        );
+        assert_eq!(
+            codex_settings(PermissionPolicy::Allow),
+            ("never", "workspace-write", false)
+        );
+        assert_eq!(
+            codex_settings(PermissionPolicy::Deny),
+            ("never", "read-only", false)
+        );
+        assert_eq!(
+            codex_settings(PermissionPolicy::Bypass),
+            ("never", "danger-full-access", true)
+        );
+
         assert_eq!(
             codebuddy_settings(PermissionPolicy::Ask),
-            ("default", false)
+            (Some("default"), false)
         );
         assert_eq!(
             codebuddy_settings(PermissionPolicy::Allow),
-            ("bypassPermissions", false)
+            (Some("acceptEdits"), false)
         );
         assert_eq!(
             codebuddy_settings(PermissionPolicy::Deny),
-            ("dontAsk", false)
+            (Some("dontAsk"), false)
+        );
+        assert_eq!(codebuddy_settings(PermissionPolicy::Bypass), (None, true));
+
+        assert!(!auto_approve(PermissionPolicy::Ask));
+        assert!(auto_approve(PermissionPolicy::Allow));
+        assert!(!auto_approve(PermissionPolicy::Deny));
+        assert!(auto_approve(PermissionPolicy::Bypass));
+
+        assert_eq!(
+            pty_permission_args("claude", PermissionPolicy::Allow),
+            vec!["--permission-mode", "acceptEdits"]
         );
         assert_eq!(
-            codebuddy_settings(PermissionPolicy::Bypass),
-            ("default", true)
+            pty_permission_args("codex", PermissionPolicy::Deny),
+            vec!["--ask-for-approval", "never", "--sandbox", "read-only"]
         );
+        assert_eq!(
+            pty_permission_args("opencode", PermissionPolicy::Allow),
+            vec!["--dangerously-skip-permissions"]
+        );
+        assert!(pty_permission_args("unknown", PermissionPolicy::Bypass).is_empty());
     }
 }
